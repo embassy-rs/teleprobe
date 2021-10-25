@@ -8,19 +8,19 @@ use crate::config::ProbeFilter;
 pub struct Opts {
     /// The probe to use (eg. `VID:PID`, `VID:PID:Serial`, or just `Serial`).
     #[clap(long, env = "PROBE_RUN_PROBE")]
-    probe: Option<String>,
+    pub probe: Option<String>,
 
     /// The probe clock frequency in kHz
     #[clap(long)]
-    speed: Option<u32>,
+    pub speed: Option<u32>,
 
     /// Chip name
     #[clap(long)]
-    chip: String,
+    pub chip: String,
 
     /// Connect to device when NRST is pressed.
     #[clap(long)]
-    connect_under_reset: bool,
+    pub connect_under_reset: bool,
 }
 
 pub fn connect(opts: Opts) -> Result<Session> {
@@ -48,7 +48,7 @@ pub fn connect(opts: Opts) -> Result<Session> {
         probe.set_speed(speed)?;
     }
 
-    let target = probe_rs::config::get_target_by_name(&opts.chip).unwrap();
+    let target = probe_rs::config::get_target_by_name(&opts.chip)?;
 
     let sess = if opts.connect_under_reset {
         probe.attach_under_reset(target)?

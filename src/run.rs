@@ -1,17 +1,15 @@
 use anyhow::{anyhow, bail};
 use defmt_decoder::{Location, Table};
-use log::*;
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
-use object::{ObjectSegment, ObjectSymbol};
+use object::ObjectSymbol;
 use probe_rs::flashing::DownloadOptions;
 use probe_rs::CoreRegisterAddress;
 use probe_rs::{Core, MemoryInterface, Session};
 use probe_rs_rtt::{Rtt, ScanRegion, UpChannel};
 use std::collections::BTreeMap;
 use std::convert::TryInto;
-use std::io::{Cursor, Read as _};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::io::Cursor;
+use std::time::{Duration, Instant};
 
 pub const LR: CoreRegisterAddress = CoreRegisterAddress(14);
 pub const PC: CoreRegisterAddress = CoreRegisterAddress(15);
@@ -21,7 +19,29 @@ pub const XPSR: CoreRegisterAddress = CoreRegisterAddress(16);
 const THUMB_BIT: u32 = 1;
 const TIMEOUT: Duration = Duration::from_secs(1);
 
-pub struct Runner {
+pub struct Options {
+    pub do_flash: bool,
+    pub deadline: Option<Instant>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            do_flash: true,
+            deadline: None,
+        }
+    }
+}
+
+pub fn run(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Result<()> {
+    let mut r = Runner::new(sess, elf_bytes, opts)?;
+    r.run(sess)?;
+    Ok(())
+}
+
+struct Runner {
+    opts: Options,
+
     rtt_addr: u32,
     main_addr: u32,
     vector_table: VectorTable,
@@ -34,7 +54,7 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn launch(sess: &mut Session, elf_bytes: &[u8], do_flash: bool) -> anyhow::Result<Self> {
+    fn new(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Result<Self> {
         let elf = ElfFile::parse(elf_bytes)?;
 
         let table = defmt_decoder::Table::parse(&elf_bytes)?.unwrap();
@@ -42,9 +62,9 @@ impl Runner {
         if !table.is_empty() && locs.is_empty() {
             bail!("insufficient DWARF info; compile your program with `debug = 2` to enable location info");
         }
-        if !table.indices().all(|idx| locs.contains_key(&(idx as u64))) {
-            bail!("(BUG) location info is incomplete; it will be omitted from the output");
-        }
+        //if !table.indices().all(|idx| locs.contains_key(&(idx as u64))) {
+        //    bail!("(BUG) location info is incomplete; it will be omitted from the output");
+        //}
 
         // sections used in cortex-m-rt
         // NOTE we won't load `.uninit` so it is not included here
@@ -92,7 +112,7 @@ impl Runner {
 
         let run_from_ram = vector_table.location >= 0x2000_0000;
 
-        if !do_flash {
+        if !opts.do_flash {
             log::info!("skipped flashing");
         } else {
             sess.core(0)?.reset_and_halt(TIMEOUT)?;
@@ -157,6 +177,7 @@ impl Runner {
         let defmt = setup_logging_channel(rtt_addr, sess)?;
 
         Ok(Self {
+            opts,
             rtt_addr,
             main_addr,
             vector_table,
@@ -177,9 +198,7 @@ impl Runner {
         while !self.defmt_buf.is_empty() {
             match self.defmt_table.decode(&self.defmt_buf) {
                 Ok((frame, consumed)) => {
-                    // NOTE(`[]` indexing) all indices in `table` have already been
-                    // verified to exist in the `locs` map
-                    let loc = Some(&self.defmt_locs[&frame.index()]);
+                    let loc = self.defmt_locs.get(&frame.index());
 
                     let (mut file, mut line, mut mod_path) = (None, None, None);
                     if let Some(loc) = loc {
@@ -224,14 +243,16 @@ impl Runner {
         Ok(())
     }
 
-    pub fn run_to_completion(
-        &mut self,
-        sess: &mut Session,
-        exit: &AtomicBool,
-    ) -> anyhow::Result<()> {
+    fn run(&mut self, sess: &mut Session) -> anyhow::Result<()> {
         let mut was_halted = false;
 
-        while !exit.load(Ordering::SeqCst) {
+        loop {
+            if let Some(deadline) = self.opts.deadline {
+                if Instant::now() > deadline {
+                    bail!("Deadline exceeded")
+                }
+            }
+
             self.poll(sess)?;
 
             let mut core = sess.core(0)?;

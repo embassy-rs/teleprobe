@@ -1,17 +1,31 @@
 use anyhow::anyhow;
 use serde::{de, Deserialize, Deserializer};
+use std::collections::HashMap;
 use std::str::FromStr;
 
 #[derive(Deserialize)]
 pub struct Config {
     pub targets: Vec<Target>,
+    pub auth: Auth,
+}
+
+#[derive(Deserialize)]
+pub struct Auth {
+    pub issuer: String,
+    pub rules: Vec<AuthRule>,
+}
+
+#[derive(Deserialize)]
+pub struct AuthRule {
+    #[serde(default)]
+    pub claims: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
 pub struct Target {
     pub name: String,
     pub chip: String,
-    pub probe: ProbeFilter,
+    pub probe: String,
 }
 
 pub struct ProbeFilter {

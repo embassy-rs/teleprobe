@@ -1,10 +1,13 @@
 mod config;
+mod log_capture;
+mod logger;
+mod oidc;
 mod probe;
 mod run;
+mod server;
 
 use clap::{AppSettings, Clap};
-use run::Runner;
-use std::{fs, sync::atomic::AtomicBool};
+use std::fs;
 
 /// This doc string acts as a help message when the user runs '--help'
 /// as do all doc strings on fields
@@ -19,6 +22,7 @@ struct Opts {
 #[derive(Clap)]
 enum SubCommand {
     Run(RunCmd),
+    Server(ServerCmd),
 }
 
 #[derive(Clap)]
@@ -27,30 +31,40 @@ pub struct RunCmd {
     #[clap(long)]
     pub elf: String,
 
-    /// Skip writing the application binary to flash.
-    #[clap(long)]
-    pub no_flash: bool,
-
     #[clap(flatten)]
     probe: probe::Opts,
 }
 
+#[derive(Clap)]
+pub struct ServerCmd {}
+
 fn main() -> anyhow::Result<()> {
-    pretty_env_logger::init();
+    let mut builder = env_logger::Builder::new();
+    if let Ok(s) = ::std::env::var("RUST_LOG") {
+        builder.parse_filters(&s);
+    } else {
+        builder.filter_module("teleprobe", log::LevelFilter::Info);
+        builder.filter_module("device", log::LevelFilter::Trace);
+    }
+    logger::init(Box::new(builder.build()));
 
     let opts: Opts = Opts::parse();
     match opts.subcmd {
         SubCommand::Run(cmd) => run(cmd),
+        SubCommand::Server(cmd) => server(cmd),
     }
 }
 
 fn run(cmd: RunCmd) -> anyhow::Result<()> {
     let elf = fs::read(cmd.elf)?;
     let mut sess = probe::connect(cmd.probe)?;
-    let mut runner = Runner::launch(&mut sess, &elf, !cmd.no_flash)?;
 
-    let exit = AtomicBool::new(false);
-    runner.run_to_completion(&mut sess, &exit)?;
+    let mut opts = run::Options::default();
+    run::run(&mut sess, &elf, opts)
+}
 
-    Ok(())
+fn server(cmd: ServerCmd) -> anyhow::Result<()> {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(server::serve())
 }
