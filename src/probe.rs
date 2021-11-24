@@ -1,10 +1,10 @@
 use anyhow::{bail, Result};
-use clap::Clap;
+use clap::Parser;
 use probe_rs::{DebugProbeInfo, Probe, Session};
 
 use crate::config::ProbeFilter;
 
-#[derive(Clone, Clap)]
+#[derive(Clone, Parser)]
 pub struct Opts {
     /// The probe to use (eg. `VID:PID`, `VID:PID:Serial`, or just `Serial`).
     #[clap(long, env = "PROBE_RUN_PROBE")]

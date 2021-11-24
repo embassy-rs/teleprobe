@@ -6,26 +6,25 @@ mod probe;
 mod run;
 mod server;
 
-use clap::{AppSettings, Clap};
+use clap::Parser;
 use std::fs;
 
 /// This doc string acts as a help message when the user runs '--help'
 /// as do all doc strings on fields
-#[derive(Clap)]
+#[derive(Parser)]
 #[clap(version = "1.0", author = "Dario Nieuwenhuis <dirbaio@dirbaio.net>")]
-#[clap(setting = AppSettings::ColoredHelp)]
 struct Opts {
     #[clap(subcommand)]
     subcmd: SubCommand,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 enum SubCommand {
     Run(RunCmd),
     Server(ServerCmd),
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 pub struct RunCmd {
     /// ELF file to flash+run
     #[clap(long)]
@@ -35,7 +34,7 @@ pub struct RunCmd {
     probe: probe::Opts,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 pub struct ServerCmd {}
 
 fn main() -> anyhow::Result<()> {
