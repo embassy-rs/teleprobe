@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use defmt_decoder::{Location, Table};
+use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
 use probe_rs::flashing::DownloadOptions;
@@ -45,22 +45,25 @@ struct Runner {
     rtt_addr: u32,
     main_addr: u32,
     vector_table: VectorTable,
-    defmt_table: Table,
-    defmt_locs: BTreeMap<u64, Location>,
 
     defmt: UpChannel,
+    defmt_table: Box<Table>,
+    defmt_locs: BTreeMap<u64, Location>,
+    defmt_stream: Box<dyn StreamDecoder>,
+}
 
-    defmt_buf: Vec<u8>,
+unsafe fn fuck_it<'a, 'b, T>(wtf: &'a T) -> &'b T {
+    std::mem::transmute(wtf)
 }
 
 impl Runner {
     fn new(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Result<Self> {
         let elf = ElfFile::parse(elf_bytes)?;
 
-        let table = defmt_decoder::Table::parse(&elf_bytes)?.unwrap();
+        let table = Box::new(defmt_decoder::Table::parse(&elf_bytes)?.unwrap());
         let locs = table.get_locations(&elf_bytes)?;
         if !table.is_empty() && locs.is_empty() {
-            bail!("insufficient DWARF info; compile your program with `debug = 2` to enable location info");
+            log::warn!("insufficient DWARF info; compile your program with `debug = 2` to enable location info");
         }
         //if !table.indices().all(|idx| locs.contains_key(&(idx as u64))) {
         //    bail!("(BUG) location info is incomplete; it will be omitted from the output");
@@ -176,6 +179,8 @@ impl Runner {
 
         let defmt = setup_logging_channel(rtt_addr, sess)?;
 
+        let defmt_stream = unsafe { fuck_it(&table) }.new_stream_decoder();
+
         Ok(Self {
             opts,
             rtt_addr,
@@ -183,8 +188,8 @@ impl Runner {
             vector_table,
             defmt_table: table,
             defmt_locs: locs,
-            defmt_buf: vec![],
             defmt,
+            defmt_stream,
         })
     }
 
@@ -193,11 +198,11 @@ impl Runner {
 
         let mut read_buf = [0; 1024];
         let n = self.defmt.read(&mut sess.core(0).unwrap(), &mut read_buf)?;
-        self.defmt_buf.extend_from_slice(&read_buf[..n]);
+        self.defmt_stream.received(&read_buf[..n]);
 
-        while !self.defmt_buf.is_empty() {
-            match self.defmt_table.decode(&self.defmt_buf) {
-                Ok((frame, consumed)) => {
+        loop {
+            match self.defmt_stream.decode() {
+                Ok(frame) => {
                     let loc = self.defmt_locs.get(&frame.index());
 
                     let (mut file, mut line, mut mod_path) = (None, None, None);
@@ -215,13 +220,16 @@ impl Runner {
 
                     log::logger().log(
                         &log::Record::builder()
-                            .level(match frame.level().as_str() {
-                                "trace" => log::Level::Trace,
-                                "debug" => log::Level::Debug,
-                                "info" => log::Level::Info,
-                                "warn" => log::Level::Warn,
-                                "error" => log::Level::Error,
-                                _ => log::Level::Error,
+                            .level(match frame.level() {
+                                Some(level) => match level.as_str() {
+                                    "trace" => log::Level::Trace,
+                                    "debug" => log::Level::Debug,
+                                    "info" => log::Level::Info,
+                                    "warn" => log::Level::Warn,
+                                    "error" => log::Level::Error,
+                                    _ => log::Level::Error,
+                                },
+                                None => log::Level::Info,
                             })
                             .file(file.as_deref())
                             .line(line)
@@ -230,13 +238,14 @@ impl Runner {
                             .args(format_args!("{}", frame.display_message()))
                             .build(),
                     );
-
-                    self.defmt_buf.drain(0..consumed);
                 }
-                Err(defmt_decoder::DecodeError::UnexpectedEof) => break,
-                Err(defmt_decoder::DecodeError::Malformed) => {
-                    bail!("failed to decode defmt data")
-                }
+                Err(DecodeError::UnexpectedEof) => break,
+                Err(DecodeError::Malformed) => match self.defmt_table.encoding().can_recover() {
+                    // if recovery is impossible, abort
+                    false => bail!("failed to decode defmt data"),
+                    // if recovery is possible, skip the current frame and continue with new data
+                    true => log::warn!("failed to decode defmt data"),
+                },
             }
         }
 
