@@ -26,7 +26,7 @@ pub struct Opts {
 pub fn list() -> Result<()> {
     for probe in Probe::list_all() {
         println!(
-            "{}:{}:{} -- {:?} {}",
+            "{:04x}:{:04x}:{} -- {:?} {}",
             probe.vendor_id,
             probe.product_id,
             probe.serial_number.unwrap_or(String::new()),
