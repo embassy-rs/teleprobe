@@ -23,6 +23,21 @@ pub struct Opts {
     pub connect_under_reset: bool,
 }
 
+pub fn list() -> Result<()> {
+    for probe in Probe::list_all() {
+        println!(
+            "{}:{}:{} -- {:?} {}",
+            probe.vendor_id,
+            probe.product_id,
+            probe.serial_number.unwrap_or(String::new()),
+            probe.probe_type,
+            probe.identifier,
+        );
+    }
+
+    Ok(())
+}
+
 pub fn connect(opts: Opts) -> Result<Session> {
     let probes = Probe::list_all();
     let probes = if let Some(probe_opt) = opts.probe.as_deref() {

@@ -20,9 +20,13 @@ struct Opts {
 
 #[derive(Parser)]
 enum SubCommand {
+    ListProbes(ListProbesCmd),
     Run(RunCmd),
     Server(ServerCmd),
 }
+
+#[derive(Parser)]
+pub struct ListProbesCmd {}
 
 #[derive(Parser)]
 pub struct RunCmd {
@@ -50,8 +54,13 @@ fn main() -> anyhow::Result<()> {
     let opts: Opts = Opts::parse();
     match opts.subcmd {
         SubCommand::Run(cmd) => run(cmd),
+        SubCommand::ListProbes(cmd) => list_probes(cmd),
         SubCommand::Server(cmd) => server(cmd),
     }
+}
+
+fn list_probes(cmd: ListProbesCmd) -> anyhow::Result<()> {
+    probe::list()
 }
 
 fn run(cmd: RunCmd) -> anyhow::Result<()> {
