@@ -1,0 +1,14 @@
+auths:
+  - oidc:
+      issuer: https://token.actions.githubusercontent.com
+      rules:
+        - claims:
+            iss: https://token.actions.githubusercontent.com
+            aud: https://github.com/embassy-rs
+            repository: embassy-rs/embassy
+  - token:
+      token: hN6e2msKlqsW9smsjyF5I7xmiuPQij0O
+targets:
+  - name: nucleo-stm32f429zi
+    chip: stm32f429zitx
+    probe: 0483:374b:0670FF495254707867252236
