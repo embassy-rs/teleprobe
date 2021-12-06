@@ -6,14 +6,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::bail;
 use bytes::Bytes;
 use log::{error, info};
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
 use warp::reply::with_status;
-use warp::{reject, Filter, Rejection, Reply};
+use warp::{Filter, Rejection, Reply};
 
-use crate::config::Config;
+use crate::config::{Auth, Config, OidcAuthRule};
 use crate::{log_capture, oidc, probe, run};
 
 pub struct OnDrop<F: FnOnce()> {
@@ -85,36 +86,69 @@ macro_rules! reject {
     };
 }
 
+async fn check_auth(cx: &Context, token: &str, auth: &Auth) -> Result<(), anyhow::Error> {
+    match auth {
+        Auth::Token(auth) => {
+            if token != &auth.token {
+                bail!("Incorrect token")
+            }
+            Ok(())
+        }
+        Auth::Oidc(auth) => {
+            let claims: HashMap<String, serde_json::Value> =
+                match cx.oidc_client.validate_token(token) {
+                    Ok(x) => x,
+                    Err(e) => bail!("Bad token: {}", e),
+                };
+
+            let claims: HashMap<String, String> = claims
+                .into_iter()
+                .filter_map(|(k, v)| match v {
+                    serde_json::Value::String(s) => Some((k, s)),
+                    _ => None,
+                })
+                .collect();
+
+            if !auth
+                .rules
+                .iter()
+                .any(|r: &OidcAuthRule| r.claims.iter().all(|(k, v)| claims.get(k) == Some(v)))
+            {
+                bail!("No oidc claims rule matched");
+            }
+
+            Ok(())
+        }
+    }
+}
+
 async fn handle_run(
     name: String,
     auth_header: String,
     elf: Bytes,
     cx: &Context,
 ) -> Result<impl Reply, Rejection> {
-    println!("header: '{}'", auth_header);
     let token = match auth_header.strip_prefix("Bearer ") {
         Some(t) => t,
         None => reject!(StatusCode::UNAUTHORIZED, "Bad Authorization header format"),
     };
 
-    let claims: HashMap<String, serde_json::Value> = match cx.oidc_client.validate_token(token) {
-        Ok(x) => x,
-        Err(e) => reject!("Bad token: {}", e),
-    };
+    let mut found = false;
 
-    let claims: HashMap<String, String> = claims
-        .into_iter()
-        .filter_map(|(k, v)| match v {
-            serde_json::Value::String(s) => Some((k, s)),
-            _ => None,
-        })
-        .collect();
-    println!("claims: {:#?}", claims);
+    for (i, auth) in cx.config.auths.iter().enumerate() {
+        match check_auth(cx, token, auth).await {
+            Ok(()) => {
+                found = true;
+                break;
+            }
+            Err(e) => {
+                info!("Auth {} failed: {:?}", i, e)
+            }
+        }
+    }
 
-    if !cx.config.auth.rules.iter().any(|rule| {
-        return rule.claims.iter().all(|(k, v)| claims.get(k) == Some(v));
-    }) {
-        reject!(StatusCode::UNAUTHORIZED, "Permission denied")
+    if !found {
+        reject!(StatusCode::UNAUTHORIZED, "Unauthorized")
     }
 
     let target = match cx.config.targets.iter().find(|t| t.name == name) {
@@ -148,7 +182,16 @@ pub async fn serve() -> anyhow::Result<()> {
     let config = fs::read("config.yaml")?;
     let config: Config = serde_yaml::from_slice(&config)?;
 
-    let oidc_client = oidc::Client::new_autodiscover(&config.auth.issuer).await?;
+    // TODO support none or multiple oidc issuers.
+    let oidc = config
+        .auths
+        .iter()
+        .find_map(|a| match a {
+            Auth::Oidc(o) => Some(o),
+            _ => None,
+        })
+        .unwrap();
+    let oidc_client = oidc::Client::new_autodiscover(&oidc.issuer).await?;
 
     let context = &*Box::leak(Box::new(Context {
         oidc_client,
@@ -163,7 +206,7 @@ pub async fn serve() -> anyhow::Result<()> {
         .and(with_val(context))
         .and_then(handle_run);
 
-    info!("Listening");
+    info!("Listening on :8080");
     warp::serve(target_run).run(([0, 0, 0, 0], 8080)).await;
 
     Ok(())

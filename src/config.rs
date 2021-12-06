@@ -6,19 +6,32 @@ use std::str::FromStr;
 #[derive(Deserialize)]
 pub struct Config {
     pub targets: Vec<Target>,
-    pub auth: Auth,
+    pub auths: Vec<Auth>,
 }
 
 #[derive(Deserialize)]
-pub struct Auth {
+pub enum Auth {
+    #[serde(rename = "oidc")]
+    Oidc(OidcAuth),
+    #[serde(rename = "token")]
+    Token(TokenAuth),
+}
+
+#[derive(Deserialize)]
+pub struct OidcAuth {
     pub issuer: String,
-    pub rules: Vec<AuthRule>,
+    pub rules: Vec<OidcAuthRule>,
 }
 
 #[derive(Deserialize)]
-pub struct AuthRule {
+pub struct OidcAuthRule {
     #[serde(default)]
     pub claims: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+pub struct TokenAuth {
+    pub token: String,
 }
 
 #[derive(Deserialize)]
