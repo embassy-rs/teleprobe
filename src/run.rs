@@ -145,8 +145,12 @@ impl Runner {
             }
 
             if run_from_ram {
-                core.write_core_reg(PC, vector_table.reset).unwrap();
-                core.write_core_reg(SP, vector_table.initial_sp).unwrap();
+                core.write_core_reg(PC, vector_table.reset)?;
+                core.write_core_reg(SP, vector_table.initial_sp)?;
+
+                // Write VTOR
+                // NOTE this DOES NOT play nice with the softdevice.
+                core.write_word_32(0xE000ED08, vector_table.location)?;
 
                 // Hacks to get the softdevice to think we're doing a cold boot here.
                 //core.write_32(0x2000_005c, &[0]).unwrap();
