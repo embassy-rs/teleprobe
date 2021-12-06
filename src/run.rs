@@ -130,7 +130,7 @@ impl Runner {
             loader.commit(sess, dopts)?;
 
             //flashing::download_file_with_options(sess, &opts.elf, Format::Elf, dopts)?;
-            log::info!("success!");
+            log::info!("flashing done!");
         }
 
         let (rtt_addr, main_addr) = get_rtt_main_from(&elf)?;
