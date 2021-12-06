@@ -123,6 +123,7 @@ impl Runner {
             log::info!("flashing program...");
             let mut dopts = DownloadOptions::new();
             dopts.keep_unwritten_bytes = true;
+            dopts.verify = true;
 
             let mut loader = sess.target().flash_loader();
             loader.load_elf_data(&mut Cursor::new(&elf_bytes))?;
