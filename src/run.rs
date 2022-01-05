@@ -138,6 +138,17 @@ impl Runner {
 
         {
             let mut core = sess.core(0)?;
+
+            if run_from_ram {
+                // On STM32H7 due to RAM ECC (I think?) it's possible that the
+                // last written word doesn't "stick" on reset because it's "half written"
+                // https://www.st.com/resource/en/application_note/dm00623136-error-correction-code-ecc-management-for-internal-memories-protection-on-stm32h7-series-stmicroelectronics.pdf
+                //
+                // Do one dummy write to ensure the last word sticks.
+                let data = core.read_word_32(vector_table.location)?;
+                core.write_word_32(vector_table.location, data)?;
+            }
+
             core.reset_and_halt(TIMEOUT)?;
 
             log::debug!("starting device");
