@@ -7,14 +7,14 @@ mod base64 {
     use serde::{Deserialize, Serialize};
     use serde::{Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
         let base64 = base64::encode(v);
         String::serialize(&base64, s)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let base64 = String::deserialize(d)?;
-        base64::decode(base64.as_bytes()).map_err(|e| serde::de::Error::custom(e))
+        base64::decode(base64.as_bytes()).map_err(serde::de::Error::custom)
     }
 }
 
@@ -51,7 +51,7 @@ pub struct Client {
 impl Client {
     pub async fn new_autodiscover(issuer: &str) -> anyhow::Result<Self> {
         let mut config_url = issuer.to_string();
-        if !config_url.ends_with("/") {
+        if !config_url.ends_with('/') {
             config_url.push('/');
         }
         config_url.push_str(".well-known/openid-configuration");

@@ -1,16 +1,14 @@
+mod auth;
 mod config;
-mod log_capture;
-mod logger;
-mod oidc;
+mod logging;
 mod probe;
 mod run;
 mod server;
+mod util;
 
 use clap::Parser;
-use std::fs;
+use logging::thread_local_logger;
 
-/// This doc string acts as a help message when the user runs '--help'
-/// as do all doc strings on fields
 #[derive(Parser)]
 #[clap(version = "1.0", author = "Dario Nieuwenhuis <dirbaio@dirbaio.net>")]
 struct Opts {
@@ -49,7 +47,7 @@ fn main() -> anyhow::Result<()> {
         builder.filter_module("teleprobe", log::LevelFilter::Info);
         builder.filter_module("device", log::LevelFilter::Trace);
     }
-    logger::init(Box::new(builder.build()));
+    thread_local_logger::init(Box::new(builder.build()));
 
     let opts: Opts = Opts::parse();
     match opts.subcmd {
@@ -59,20 +57,20 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn list_probes(cmd: ListProbesCmd) -> anyhow::Result<()> {
+fn list_probes(_cmd: ListProbesCmd) -> anyhow::Result<()> {
     probe::list()
 }
 
 fn run(cmd: RunCmd) -> anyhow::Result<()> {
-    let elf = fs::read(cmd.elf)?;
+    let elf = std::fs::read(cmd.elf)?;
     let mut sess = probe::connect(cmd.probe)?;
 
-    let mut opts = run::Options::default();
+    let opts = run::Options::default();
     run::run(&mut sess, &elf, opts)
 }
 
-fn server(cmd: ServerCmd) -> anyhow::Result<()> {
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+fn server(_cmd: ServerCmd) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(server::serve())
 }

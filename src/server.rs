@@ -1,77 +1,47 @@
 use std::collections::HashMap;
 use std::fs;
-use std::mem;
-use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use bytes::Bytes;
 use log::{error, info};
+use serde::{Deserialize, Serialize};
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
 use warp::reply::with_status;
 use warp::{Filter, Rejection, Reply};
 
-use crate::config::{Auth, Config, OidcAuthRule};
-use crate::{log_capture, oidc, probe, run};
-
-pub struct OnDrop<F: FnOnce()> {
-    f: MaybeUninit<F>,
-}
-
-impl<F: FnOnce()> OnDrop<F> {
-    pub fn new(f: F) -> Self {
-        Self {
-            f: MaybeUninit::new(f),
-        }
-    }
-
-    pub fn defuse(self) {
-        mem::forget(self)
-    }
-}
-
-impl<F: FnOnce()> Drop for OnDrop<F> {
-    fn drop(&mut self) {
-        unsafe { self.f.as_ptr().read()() }
-    }
-}
+use crate::config::{Auth, Config, OidcAuthRule, Target, TargetList};
+use crate::{auth::oidc, probe, run};
 
 const DEFAULT_LOG_FILTER: &str = "info,device=trace";
 
-fn do_do_run(elf: Bytes, probe: probe::Opts) -> anyhow::Result<()> {
+fn run_firmware_on_device(elf: Bytes, probe: probe::Opts) -> anyhow::Result<()> {
     let mut sess = probe::connect(probe)?;
 
-    let mut opts = run::Options::default();
-    opts.deadline = Some(Instant::now() + Duration::from_secs(5));
+    let opts = run::Options {
+        deadline: Some(Instant::now() + Duration::from_secs(10)),
+        ..Default::default()
+    };
     run::run(&mut sess, &elf, opts)?;
 
     Ok(())
 }
 
-async fn do_run(elf: Bytes, probe: probe::Opts) -> (bool, Vec<u8>) {
-    let exit = Arc::new(AtomicBool::new(false));
-    let exit2 = exit.clone();
-
-    let drop = OnDrop::new(move || {
-        println!("dropped");
-        exit.store(true, Ordering::SeqCst)
-    });
-
-    let res = spawn_blocking(move || {
-        log_capture::with_capture(DEFAULT_LOG_FILTER, || match do_do_run(elf, probe) {
-            Ok(()) => true,
-            Err(e) => {
-                error!("Run failed: {}", e);
-                false
+async fn run_with_log_capture(elf: Bytes, probe: probe::Opts) -> (bool, Vec<u8>) {
+    spawn_blocking(move || {
+        crate::logging::capture::with_capture(DEFAULT_LOG_FILTER, || {
+            match run_firmware_on_device(elf, probe) {
+                Ok(()) => true,
+                Err(e) => {
+                    error!("Run failed: {}", e);
+                    false
+                }
             }
         })
     })
-    .await;
-
-    res.unwrap()
+    .await
+    .unwrap()
 }
 
 macro_rules! reject {
@@ -86,71 +56,94 @@ macro_rules! reject {
     };
 }
 
-async fn check_auth(cx: &Context, token: &str, auth: &Auth) -> Result<(), anyhow::Error> {
+fn check_auth_token(cx: &Context, token: &str, auth: &Auth) -> Result<(), anyhow::Error> {
     match auth {
         Auth::Token(auth) => {
-            if token != &auth.token {
+            if token != auth.token {
                 bail!("Incorrect token")
             }
             Ok(())
         }
         Auth::Oidc(auth) => {
-            let claims: HashMap<String, serde_json::Value> =
-                match cx.oidc_client.validate_token(token) {
+            if let Some(client) = &cx.oidc_client {
+                let claims: HashMap<String, serde_json::Value> = match client.validate_token(token)
+                {
                     Ok(x) => x,
                     Err(e) => bail!("Bad token: {}", e),
                 };
 
-            let claims: HashMap<String, String> = claims
-                .into_iter()
-                .filter_map(|(k, v)| match v {
-                    serde_json::Value::String(s) => Some((k, s)),
-                    _ => None,
-                })
-                .collect();
+                let claims: HashMap<String, String> = claims
+                    .into_iter()
+                    .filter_map(|(k, v)| match v {
+                        serde_json::Value::String(s) => Some((k, s)),
+                        _ => None,
+                    })
+                    .collect();
 
-            if !auth
-                .rules
-                .iter()
-                .any(|r: &OidcAuthRule| r.claims.iter().all(|(k, v)| claims.get(k) == Some(v)))
-            {
-                bail!("No oidc claims rule matched");
+                if !auth
+                    .rules
+                    .iter()
+                    .any(|r: &OidcAuthRule| r.claims.iter().all(|(k, v)| claims.get(k) == Some(v)))
+                {
+                    bail!("No oidc claims rule matched");
+                }
+
+                Ok(())
+            } else {
+                bail!("Attempted to use OIDC auth when OIDC was not configured.")
             }
-
-            Ok(())
         }
     }
 }
 
-async fn handle_run(
-    name: String,
-    auth_header: String,
-    elf: Bytes,
-    cx: &Context,
-) -> Result<impl Reply, Rejection> {
+// Warp doesn't support UNAUTHORIZED in rejects yet
+#[derive(Debug)]
+struct BadAuthHeaderFormat;
+
+impl warp::reject::Reject for BadAuthHeaderFormat {}
+
+#[derive(Debug)]
+struct Unauthorized;
+
+impl warp::reject::Reject for Unauthorized {}
+
+async fn check_auth(auth_header: String, cx: Context) -> Result<(), Rejection> {
     let token = match auth_header.strip_prefix("Bearer ") {
         Some(t) => t,
-        None => reject!(StatusCode::UNAUTHORIZED, "Bad Authorization header format"),
+        None => return Err(warp::reject::custom(BadAuthHeaderFormat)),
     };
 
     let mut found = false;
 
     for (i, auth) in cx.config.auths.iter().enumerate() {
-        match check_auth(cx, token, auth).await {
+        match check_auth_token(&cx, token, auth) {
             Ok(()) => {
                 found = true;
+                info!("Auth method {} #{} succeeded.", auth.to_string(), i);
                 break;
             }
             Err(e) => {
-                info!("Auth {} failed: {:?}", i, e)
+                info!("Auth method {} #{} failed: {:?}", auth.to_string(), i, e)
             }
         }
     }
 
     if !found {
-        reject!(StatusCode::UNAUTHORIZED, "Unauthorized")
+        return Err(warp::reject::custom(Unauthorized));
     }
 
+    Ok(())
+}
+
+fn check_auth_filter(cx: Context) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+    let with_context = warp::any().map(move || cx.clone());
+    warp::header("Authorization")
+        .and(with_context)
+        .and_then(check_auth)
+        .untuple_one()
+}
+
+async fn handle_run(name: String, elf: Bytes, cx: Context) -> Result<impl Reply, Rejection> {
     let target = match cx.config.targets.iter().find(|t| t.name == name) {
         Some(x) => x,
         None => reject!(StatusCode::NOT_FOUND, "Target not found: {}", name),
@@ -163,7 +156,7 @@ async fn handle_run(
         speed: None,
     };
 
-    let (ok, logs) = do_run(elf, probe).await;
+    let (ok, logs) = run_with_log_capture(elf, probe).await;
     let status = if ok {
         StatusCode::OK
     } else {
@@ -173,8 +166,21 @@ async fn handle_run(
     Ok(with_status(logs, status))
 }
 
+async fn handle_list_targets(cx: Context) -> Result<impl Reply, Rejection> {
+    let targets = TargetList {
+        targets: cx.config.targets,
+    };
+
+    Ok(with_status(
+        // NOTE (unwrap): error in this call is caused by programmer error and should never be caused by the user data
+        serde_json::to_vec_pretty(&targets).unwrap(),
+        StatusCode::OK,
+    ))
+}
+
+#[derive(Clone)]
 struct Context {
-    oidc_client: oidc::Client,
+    oidc_client: Option<oidc::Client>,
     config: Config,
 }
 
@@ -183,31 +189,36 @@ pub async fn serve() -> anyhow::Result<()> {
     let config: Config = serde_yaml::from_slice(&config)?;
 
     // TODO support none or multiple oidc issuers.
-    let oidc = config
-        .auths
-        .iter()
-        .find_map(|a| match a {
-            Auth::Oidc(o) => Some(o),
-            _ => None,
-        })
-        .unwrap();
-    let oidc_client = oidc::Client::new_autodiscover(&oidc.issuer).await?;
+    let oidc_client = match config.auths.iter().find_map(|a| match a {
+        Auth::Oidc(o) => Some(o),
+        _ => None,
+    }) {
+        Some(auth) => oidc::Client::new_autodiscover(&auth.issuer).await.ok(),
+        None => None,
+    };
 
-    let context = &*Box::leak(Box::new(Context {
+    let context = Context {
         oidc_client,
         config,
-    }));
+    };
 
-    // GET /hello/warp => 200 OK with body "Hello, warp!"
     let target_run: _ = warp::path!("targets" / String / "run")
         .and(warp::post())
-        .and(warp::header("Authorization"))
+        .and(check_auth_filter(context.clone()))
         .and(warp::body::bytes())
-        .and(with_val(context))
+        .and(with_val(context.clone()))
         .and_then(handle_run);
 
+    let list_targets: _ = warp::path!("targets")
+        .and(warp::get())
+        .and(check_auth_filter(context.clone()))
+        .and(with_val(context.clone()))
+        .and_then(handle_list_targets);
+
     info!("Listening on :8080");
-    warp::serve(target_run).run(([0, 0, 0, 0], 8080)).await;
+    warp::serve(target_run.or(list_targets))
+        .run(([0, 0, 0, 0], 8080))
+        .await;
 
     Ok(())
 }
