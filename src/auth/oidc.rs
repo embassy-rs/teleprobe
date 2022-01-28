@@ -18,7 +18,7 @@ mod base64 {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct OpenIDConfiguration {
     issuer: String,
     jwks_uri: String,
@@ -28,12 +28,12 @@ struct OpenIDConfiguration {
     scopes_supported: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct JsonWebKeySet {
     keys: Vec<JsonWebKey>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct JsonWebKey {
     kty: String,
     kid: String,
@@ -43,6 +43,7 @@ struct JsonWebKey {
     e: String,
 }
 
+#[derive(Clone)]
 pub struct Client {
     oidc_config: OpenIDConfiguration,
     keys: JsonWebKeySet,

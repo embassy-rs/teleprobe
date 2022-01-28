@@ -1,17 +1,20 @@
 use std::collections::HashMap;
 use std::fs;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use bytes::Bytes;
 use log::{error, info};
-use serde::{Deserialize, Serialize};
+
+use parking_lot::Mutex;
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
 use warp::reply::with_status;
 use warp::{Filter, Rejection, Reply};
 
-use crate::config::{Auth, Config, OidcAuthRule, Target, TargetList};
+use crate::auth::oidc::Client;
+use crate::config::{Auth, Config, OidcAuthRule, TargetList};
 use crate::{auth::oidc, probe, run};
 
 const DEFAULT_LOG_FILTER: &str = "info,device=trace";
@@ -56,7 +59,11 @@ macro_rules! reject {
     };
 }
 
-fn check_auth_token(cx: &Context, token: &str, auth: &Auth) -> Result<(), anyhow::Error> {
+fn check_auth_token(
+    oidc_client: Option<&Client>,
+    token: &str,
+    auth: &Auth,
+) -> Result<(), anyhow::Error> {
     match auth {
         Auth::Token(auth) => {
             if token != auth.token {
@@ -65,7 +72,7 @@ fn check_auth_token(cx: &Context, token: &str, auth: &Auth) -> Result<(), anyhow
             Ok(())
         }
         Auth::Oidc(auth) => {
-            if let Some(client) = &cx.oidc_client {
+            if let Some(client) = &oidc_client {
                 let claims: HashMap<String, serde_json::Value> = match client.validate_token(token)
                 {
                     Ok(x) => x,
@@ -107,7 +114,7 @@ struct Unauthorized;
 
 impl warp::reject::Reject for Unauthorized {}
 
-async fn check_auth(auth_header: String, cx: Context) -> Result<(), Rejection> {
+async fn check_auth(auth_header: String, cx: Arc<Mutex<Context>>) -> Result<(), Rejection> {
     let token = match auth_header.strip_prefix("Bearer ") {
         Some(t) => t,
         None => return Err(warp::reject::custom(BadAuthHeaderFormat)),
@@ -115,8 +122,9 @@ async fn check_auth(auth_header: String, cx: Context) -> Result<(), Rejection> {
 
     let mut found = false;
 
-    for (i, auth) in cx.config.auths.iter().enumerate() {
-        match check_auth_token(&cx, token, auth) {
+    let context = cx.lock();
+    for (i, auth) in context.config.auths.iter().enumerate() {
+        match check_auth_token(context.oidc_client.as_ref(), token, auth) {
             Ok(()) => {
                 found = true;
                 info!("Auth method {} #{} succeeded.", auth.to_string(), i);
@@ -135,7 +143,9 @@ async fn check_auth(auth_header: String, cx: Context) -> Result<(), Rejection> {
     Ok(())
 }
 
-fn check_auth_filter(cx: Context) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+fn check_auth_filter(
+    cx: Arc<Mutex<Context>>,
+) -> impl Filter<Extract = (), Error = Rejection> + Clone {
     let with_context = warp::any().map(move || cx.clone());
     warp::header("Authorization")
         .and(with_context)
@@ -143,10 +153,17 @@ fn check_auth_filter(cx: Context) -> impl Filter<Extract = (), Error = Rejection
         .untuple_one()
 }
 
-async fn handle_run(name: String, elf: Bytes, cx: Context) -> Result<impl Reply, Rejection> {
-    let target = match cx.config.targets.iter().find(|t| t.name == name) {
-        Some(x) => x,
-        None => reject!(StatusCode::NOT_FOUND, "Target not found: {}", name),
+async fn handle_run(
+    name: String,
+    elf: Bytes,
+    cx: Arc<Mutex<Context>>,
+) -> Result<impl Reply, Rejection> {
+    let target = {
+        let context = cx.lock();
+        match context.config.targets.iter().find(|t| t.name == name) {
+            Some(x) => x.clone(),
+            None => reject!(StatusCode::NOT_FOUND, "Target not found: {}", name),
+        }
     };
 
     let probe = probe::Opts {
@@ -166,9 +183,9 @@ async fn handle_run(name: String, elf: Bytes, cx: Context) -> Result<impl Reply,
     Ok(with_status(logs, status))
 }
 
-async fn handle_list_targets(cx: Context) -> Result<impl Reply, Rejection> {
+async fn handle_list_targets(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
     let targets = TargetList {
-        targets: cx.config.targets,
+        targets: cx.lock().config.targets.clone(),
     };
 
     Ok(with_status(
@@ -184,7 +201,7 @@ struct Context {
     config: Config,
 }
 
-pub async fn serve() -> anyhow::Result<()> {
+pub async fn serve(port: u16) -> anyhow::Result<()> {
     let config = fs::read("config.yaml")?;
     let config: Config = serde_yaml::from_slice(&config)?;
 
@@ -197,10 +214,10 @@ pub async fn serve() -> anyhow::Result<()> {
         None => None,
     };
 
-    let context = Context {
+    let context: Arc<Mutex<Context>> = Arc::new(Mutex::new(Context {
         oidc_client,
         config,
-    };
+    }));
 
     let target_run: _ = warp::path!("targets" / String / "run")
         .and(warp::post())
@@ -215,9 +232,9 @@ pub async fn serve() -> anyhow::Result<()> {
         .and(with_val(context.clone()))
         .and_then(handle_list_targets);
 
-    info!("Listening on :8080");
+    info!("Listening on :{}", port);
     warp::serve(target_run.or(list_targets))
-        .run(([0, 0, 0, 0], 8080))
+        .run(([0, 0, 0, 0], port))
         .await;
 
     Ok(())

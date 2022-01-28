@@ -26,7 +26,12 @@ pub struct Opts {
 }
 
 pub fn list() -> Result<()> {
-    for probe in Probe::list_all() {
+    let probes = Probe::list_all();
+    if probes.is_empty() {
+        println!("No probe found!");
+        return Ok(());
+    }
+    for probe in probes {
         println!(
             "{:04x}:{:04x}:{} -- {:?} {}",
             probe.vendor_id,
