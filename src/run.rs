@@ -60,8 +60,8 @@ impl Runner {
     fn new(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Result<Self> {
         let elf = ElfFile::parse(elf_bytes)?;
 
-        let table = Box::new(defmt_decoder::Table::parse(&elf_bytes)?.unwrap());
-        let locs = table.get_locations(&elf_bytes)?;
+        let table = Box::new(defmt_decoder::Table::parse(elf_bytes)?.unwrap());
+        let locs = table.get_locations(elf_bytes)?;
         if !table.is_empty() && locs.is_empty() {
             log::warn!("insufficient DWARF info; compile your program with `debug = 2` to enable location info");
         }
@@ -336,7 +336,7 @@ fn dump_state(core: &mut Core) -> anyhow::Result<bool> {
 
                 let ufsr = (cfsr >> 16) & 0xffff;
                 let bfsr = (cfsr >> 8) & 0xff;
-                let mmfsr = (cfsr >> 0) & 0xff;
+                let mmfsr = (cfsr) & 0xff;
 
                 if ufsr != 0 {
                     println!("\tUsage Fault     - UFSR: {:#06x}", ufsr);

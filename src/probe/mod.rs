@@ -1,14 +1,16 @@
+mod specifier;
+
 use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, Probe, Session};
 
-use crate::config::ProbeFilter;
+pub use specifier::ProbeSpecifier;
 
 #[derive(Clone, Parser)]
 pub struct Opts {
-    /// The probe to use (eg. `VID:PID`, `VID:PID:Serial`, or just `Serial`).
+    /// The probe to use (specified by eg. `VID:PID`, `VID:PID:Serial`, or just `Serial`).
     #[clap(long, env = "PROBE_RUN_PROBE")]
-    pub probe: Option<String>,
+    pub probe: Option<ProbeSpecifier>,
 
     /// The probe clock frequency in kHz
     #[clap(long)]
@@ -24,12 +26,19 @@ pub struct Opts {
 }
 
 pub fn list() -> Result<()> {
-    for probe in Probe::list_all() {
+    let probes = Probe::list_all();
+    if probes.is_empty() {
+        println!("No probe found!");
+        return Ok(());
+    }
+    for probe in probes {
         println!(
             "{:04x}:{:04x}:{} -- {:?} {}",
             probe.vendor_id,
             probe.product_id,
-            probe.serial_number.unwrap_or(String::new()),
+            probe
+                .serial_number
+                .unwrap_or_else(|| "SN unspecified".to_string()),
             probe.probe_type,
             probe.identifier,
         );
@@ -40,9 +49,8 @@ pub fn list() -> Result<()> {
 
 pub fn connect(opts: Opts) -> Result<Session> {
     let probes = Probe::list_all();
-    let probes = if let Some(probe_opt) = opts.probe.as_deref() {
-        let selector = probe_opt.parse()?;
-        probes_filter(&probes, &selector)
+    let probes = if let Some(selected_probe) = opts.probe {
+        probes_filter(&probes, &selected_probe)
     } else {
         probes
     };
@@ -75,7 +83,7 @@ pub fn connect(opts: Opts) -> Result<Session> {
     Ok(sess)
 }
 
-fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeFilter) -> Vec<DebugProbeInfo> {
+fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Vec<DebugProbeInfo> {
     probes
         .iter()
         .filter(|&p| {

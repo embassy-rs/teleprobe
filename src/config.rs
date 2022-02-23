@@ -1,15 +1,15 @@
-use anyhow::anyhow;
-use serde::{de, Deserialize, Deserializer};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::str::FromStr;
 
-#[derive(Deserialize)]
+use crate::probe::ProbeSpecifier;
+
+#[derive(Clone, Deserialize)]
 pub struct Config {
     pub targets: Vec<Target>,
     pub auths: Vec<Auth>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub enum Auth {
     #[serde(rename = "oidc")]
     Oidc(OidcAuth),
@@ -17,64 +17,41 @@ pub enum Auth {
     Token(TokenAuth),
 }
 
-#[derive(Deserialize)]
+impl ToString for Auth {
+    fn to_string(&self) -> String {
+        match self {
+            Auth::Oidc(_) => "OIDC",
+            Auth::Token(_) => "Token",
+        }
+        .to_string()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 pub struct OidcAuth {
     pub issuer: String,
     pub rules: Vec<OidcAuthRule>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct OidcAuthRule {
     #[serde(default)]
     pub claims: HashMap<String, String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TokenAuth {
     pub token: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Target {
     pub name: String,
     pub chip: String,
-    pub probe: String,
+    pub probe: ProbeSpecifier,
 }
 
-pub struct ProbeFilter {
-    pub vid_pid: Option<(u16, u16)>,
-    pub serial: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for ProbeFilter {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        FromStr::from_str(&s).map_err(de::Error::custom)
-    }
-}
-
-impl FromStr for ProbeFilter {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts = s.split(':').collect::<Vec<_>>();
-        match &*parts {
-            [serial] => Ok(Self {
-                vid_pid: None,
-                serial: Some(serial.to_string()),
-            }),
-            [vid, pid] => Ok(Self {
-                vid_pid: Some((u16::from_str_radix(vid, 16)?, u16::from_str_radix(pid, 16)?)),
-                serial: None,
-            }),
-            [vid, pid, serial] => Ok(Self {
-                vid_pid: Some((u16::from_str_radix(vid, 16)?, u16::from_str_radix(pid, 16)?)),
-                serial: Some(serial.to_string()),
-            }),
-            _ => Err(anyhow!("invalid probe filter")),
-        }
-    }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TargetList {
+    pub targets: Vec<Target>,
 }

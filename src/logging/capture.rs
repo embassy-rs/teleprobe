@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use env_logger::filter::{Builder, Filter};
 use log::Log;
 
-use crate::logger;
+use super::thread_local_logger;
 
 // This struct is used as an adaptor, it implements io::Write and forwards the buffer to a mpsc::Sender
 struct CaptureLogger {
@@ -32,7 +32,7 @@ where
     F: FnOnce() -> R,
 {
     let data = Arc::new(Mutex::new(Vec::new()));
-    logger::set_local_logger(Box::new(CaptureLogger {
+    thread_local_logger::set_local_logger(Box::new(CaptureLogger {
         data: data.clone(),
         filter: Builder::new().parse(filter).build(),
     }));
