@@ -1,22 +1,10 @@
+use std::collections::HashMap;
+
 use anyhow::{anyhow, bail};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-
-mod base64 {
-    use serde::{Deserialize, Serialize};
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        let base64 = base64::encode(v);
-        String::serialize(&base64, s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        let base64 = String::deserialize(d)?;
-        base64::decode(base64.as_bytes()).map_err(serde::de::Error::custom)
-    }
-}
+use tokio::sync::RwLock;
 
 #[derive(Clone, Deserialize)]
 struct OpenIDConfiguration {
@@ -43,33 +31,57 @@ struct JsonWebKey {
     e: String,
 }
 
-#[derive(Clone)]
-pub struct Client {
-    oidc_config: OpenIDConfiguration,
+struct Issuer {
+    config: OpenIDConfiguration,
     keys: JsonWebKeySet,
 }
 
+pub struct Client {
+    issuers: RwLock<HashMap<String, Issuer>>,
+}
+
 impl Client {
-    pub async fn new_autodiscover(issuer: &str) -> anyhow::Result<Self> {
+    pub fn new() -> Self {
+        Self {
+            issuers: RwLock::new(HashMap::new()),
+        }
+    }
+
+    async fn discover_issuer(&self, issuer: &str) -> anyhow::Result<Issuer> {
         let mut config_url = issuer.to_string();
         if !config_url.ends_with('/') {
             config_url.push('/');
         }
         config_url.push_str(".well-known/openid-configuration");
-        let oidc_config: OpenIDConfiguration = reqwest::get(config_url).await?.json().await?;
-        let keys: JsonWebKeySet = reqwest::get(&oidc_config.jwks_uri).await?.json().await?;
+        let config: OpenIDConfiguration = reqwest::get(config_url).await?.json().await?;
+        let keys: JsonWebKeySet = reqwest::get(&config.jwks_uri).await?.json().await?;
 
-        Ok(Self { oidc_config, keys })
+        Ok(Issuer { config, keys })
     }
 
-    pub fn validate_token<T>(&self, token: &str) -> anyhow::Result<T>
+    async fn ensure_discover_issuer(&self, issuer: &str) -> anyhow::Result<()> {
+        if self.issuers.read().await.contains_key(issuer) {
+            return Ok(());
+        }
+
+        let iss = self.discover_issuer(issuer).await?;
+        self.issuers.write().await.insert(issuer.to_string(), iss);
+
+        Ok(())
+    }
+
+    pub async fn validate_token<T>(&self, token: &str, issuer: &str) -> anyhow::Result<T>
     where
         T: DeserializeOwned,
     {
+        self.ensure_discover_issuer(issuer).await?;
+        let issuers = self.issuers.read().await;
+        let iss = issuers.get(issuer).unwrap();
+
         let header = jsonwebtoken::decode_header(token)?;
         let kid = header.kid.ok_or_else(|| anyhow!("header.kid empty"))?;
 
-        let key = self
+        let key = iss
             .keys
             .keys
             .iter()
@@ -83,7 +95,7 @@ impl Client {
         match header.alg {
             Algorithm::RS256 => {
                 let mut validation = Validation::new(key.alg);
-                validation.iss = Some(self.oidc_config.issuer.clone());
+                validation.iss = Some(iss.config.issuer.clone());
                 let key = DecodingKey::from_rsa_components(&key.n, &key.e);
                 let decoded = jsonwebtoken::decode::<T>(token, &key, &validation)?;
                 Ok(decoded.claims)

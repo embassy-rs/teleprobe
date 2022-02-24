@@ -7,7 +7,6 @@ use anyhow::bail;
 use bytes::Bytes;
 use log::{error, info};
 
-use parking_lot::Mutex;
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
 use warp::reply::with_status;
@@ -37,7 +36,7 @@ async fn run_with_log_capture(elf: Bytes, probe: probe::Opts) -> (bool, Vec<u8>)
             match run_firmware_on_device(elf, probe) {
                 Ok(()) => true,
                 Err(e) => {
-                    error!("Run failed: {}", e);
+                    error!("Run failed: {:?}", e);
                     false
                 }
             }
@@ -59,8 +58,8 @@ macro_rules! reject {
     };
 }
 
-fn check_auth_token(
-    oidc_client: Option<&Client>,
+async fn check_auth_token(
+    oidc_client: &Client,
     token: &str,
     auth: &Auth,
 ) -> Result<(), anyhow::Error> {
@@ -72,33 +71,29 @@ fn check_auth_token(
             Ok(())
         }
         Auth::Oidc(auth) => {
-            if let Some(client) = &oidc_client {
-                let claims: HashMap<String, serde_json::Value> = match client.validate_token(token)
-                {
+            let claims: HashMap<String, serde_json::Value> =
+                match oidc_client.validate_token(token, &auth.issuer).await {
                     Ok(x) => x,
                     Err(e) => bail!("Bad token: {}", e),
                 };
 
-                let claims: HashMap<String, String> = claims
-                    .into_iter()
-                    .filter_map(|(k, v)| match v {
-                        serde_json::Value::String(s) => Some((k, s)),
-                        _ => None,
-                    })
-                    .collect();
+            let claims: HashMap<String, String> = claims
+                .into_iter()
+                .filter_map(|(k, v)| match v {
+                    serde_json::Value::String(s) => Some((k, s)),
+                    _ => None,
+                })
+                .collect();
 
-                if !auth
-                    .rules
-                    .iter()
-                    .any(|r: &OidcAuthRule| r.claims.iter().all(|(k, v)| claims.get(k) == Some(v)))
-                {
-                    bail!("No oidc claims rule matched");
-                }
-
-                Ok(())
-            } else {
-                bail!("Attempted to use OIDC auth when OIDC was not configured.")
+            if !auth
+                .rules
+                .iter()
+                .any(|r: &OidcAuthRule| r.claims.iter().all(|(k, v)| claims.get(k) == Some(v)))
+            {
+                bail!("No oidc claims rule matched");
             }
+
+            Ok(())
         }
     }
 }
@@ -114,7 +109,7 @@ struct Unauthorized;
 
 impl warp::reject::Reject for Unauthorized {}
 
-async fn check_auth(auth_header: String, cx: Arc<Mutex<Context>>) -> Result<(), Rejection> {
+async fn check_auth(auth_header: String, cx: Arc<Context>) -> Result<(), Rejection> {
     let token = match auth_header.strip_prefix("Bearer ") {
         Some(t) => t,
         None => return Err(warp::reject::custom(BadAuthHeaderFormat)),
@@ -122,9 +117,8 @@ async fn check_auth(auth_header: String, cx: Arc<Mutex<Context>>) -> Result<(), 
 
     let mut found = false;
 
-    let context = cx.lock();
-    for (i, auth) in context.config.auths.iter().enumerate() {
-        match check_auth_token(context.oidc_client.as_ref(), token, auth) {
+    for (i, auth) in cx.config.auths.iter().enumerate() {
+        match check_auth_token(&cx.oidc_client, token, auth).await {
             Ok(()) => {
                 found = true;
                 info!("Auth method {} #{} succeeded.", auth.to_string(), i);
@@ -143,9 +137,7 @@ async fn check_auth(auth_header: String, cx: Arc<Mutex<Context>>) -> Result<(), 
     Ok(())
 }
 
-fn check_auth_filter(
-    cx: Arc<Mutex<Context>>,
-) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+fn check_auth_filter(cx: Arc<Context>) -> impl Filter<Extract = (), Error = Rejection> + Clone {
     let with_context = warp::any().map(move || cx.clone());
     warp::header("Authorization")
         .and(with_context)
@@ -153,14 +145,9 @@ fn check_auth_filter(
         .untuple_one()
 }
 
-async fn handle_run(
-    name: String,
-    elf: Bytes,
-    cx: Arc<Mutex<Context>>,
-) -> Result<impl Reply, Rejection> {
+async fn handle_run(name: String, elf: Bytes, cx: Arc<Context>) -> Result<impl Reply, Rejection> {
     let target = {
-        let context = cx.lock();
-        match context.config.targets.iter().find(|t| t.name == name) {
+        match cx.config.targets.iter().find(|t| t.name == name) {
             Some(x) => x.clone(),
             None => reject!(StatusCode::NOT_FOUND, "Target not found: {}", name),
         }
@@ -183,9 +170,9 @@ async fn handle_run(
     Ok(with_status(logs, status))
 }
 
-async fn handle_list_targets(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
+async fn handle_list_targets(cx: Arc<Context>) -> Result<impl Reply, Rejection> {
     let targets = TargetList {
-        targets: cx.lock().config.targets.clone(),
+        targets: cx.config.targets.clone(),
     };
 
     Ok(with_status(
@@ -195,9 +182,8 @@ async fn handle_list_targets(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Reje
     ))
 }
 
-#[derive(Clone)]
 struct Context {
-    oidc_client: Option<oidc::Client>,
+    oidc_client: oidc::Client,
     config: Config,
 }
 
@@ -205,19 +191,10 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     let config = fs::read("config.yaml")?;
     let config: Config = serde_yaml::from_slice(&config)?;
 
-    // TODO support none or multiple oidc issuers.
-    let oidc_client = match config.auths.iter().find_map(|a| match a {
-        Auth::Oidc(o) => Some(o),
-        _ => None,
-    }) {
-        Some(auth) => oidc::Client::new_autodiscover(&auth.issuer).await.ok(),
-        None => None,
-    };
-
-    let context: Arc<Mutex<Context>> = Arc::new(Mutex::new(Context {
-        oidc_client,
+    let context: Arc<Context> = Arc::new(Context {
+        oidc_client: oidc::Client::new(),
         config,
-    }));
+    });
 
     let target_run: _ = warp::path!("targets" / String / "run")
         .and(warp::post())
