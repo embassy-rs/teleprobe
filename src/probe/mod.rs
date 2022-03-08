@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, Probe, Session};
 
-pub use specifier::ProbeSpecifier;
+pub use crate::config::ProbeSpecifier;
 
 #[derive(Clone, Parser)]
 pub struct Opts {

@@ -4,10 +4,12 @@ use warp::Future;
 #[derive(clap::Parser)]
 #[clap(version = "1.0", author = "Dario Nieuwenhuis <dirbaio@dirbaio.net>")]
 enum Cli {
+    #[cfg(not(feature = "client-only"))]
     Local {
         #[clap(subcommand)]
         command: LocalCommand,
     },
+    #[cfg(not(feature = "client-only"))]
     Server {
         #[clap(long, default_value_t = 8080)]
         port: u16,
@@ -25,6 +27,7 @@ enum Cli {
 }
 
 #[derive(clap::Subcommand)]
+#[cfg(not(feature = "client-only"))]
 enum LocalCommand {
     ListProbes,
     Run {
@@ -53,6 +56,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli {
+        #[cfg(not(feature = "client-only"))]
         Cli::Local { command } => match command {
             LocalCommand::ListProbes => teleprobe::probe::list()?,
             LocalCommand::Run { elf, probe } => {
@@ -64,6 +68,7 @@ fn main() -> anyhow::Result<()> {
                 teleprobe::run::run(&mut sess, &elf, opts)?
             }
         },
+        #[cfg(not(feature = "client-only"))]
         Cli::Server { port } => {
             configure_logger();
             run_future(teleprobe::server::serve(port))?

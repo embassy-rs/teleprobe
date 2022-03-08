@@ -2,7 +2,10 @@ pub mod auth;
 pub mod client;
 pub mod config;
 pub mod logging;
+#[cfg(not(feature = "client-only"))]
 pub mod probe;
+#[cfg(not(feature = "client-only"))]
 pub mod run;
+#[cfg(not(feature = "client-only"))]
 pub mod server;
 pub mod util;

@@ -5,6 +5,10 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["probe-rs", "probe-rs-rtt"]
+client-only = []
+
 [dependencies]
 anyhow = "1.0.44"
 base64 = "0.13.0"
@@ -15,8 +19,8 @@ env_logger = "0.9.0"
 jsonwebtoken = "7.2.0"
 log = "0.4.14"
 object = "0.27.1"
-probe-rs = "0.12.0"
-probe-rs-rtt = "0.12.0"
+probe-rs = { version = "0.12.0", optional = true }
+probe-rs-rtt = { version = "0.12.0", optional = true }
 reqwest = { version = "0.11.6", features = ["json"]}
 serde = "1.0.130"
 serde_json = "1.0.68"
