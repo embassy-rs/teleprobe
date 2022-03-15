@@ -14,10 +14,11 @@ jobs:
           sudo apt update
           sudo apt install -y libusb-1.0-0-dev libudev-dev
 
+      - uses: actions/checkout@v2
+
       - name: Cache Dependencies
         uses: Swatinem/rust-cache@v1.3.0
         
-      - uses: actions/checkout@v2
       - name: Build
         run: |
           cargo build
