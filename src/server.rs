@@ -210,7 +210,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         Auth::Oidc(o) => Some(o),
         _ => None,
     }) {
-        Some(auth) => oidc::Client::new_autodiscover(&auth.issuer).await.ok(),
+        Some(auth) => Some(oidc::Client::new_autodiscover(&auth.issuer).await.unwrap()),
         None => None,
     };
 
