@@ -49,6 +49,10 @@ pub struct Target {
     pub name: String,
     pub chip: String,
     pub probe: ProbeSpecifier,
+    #[serde(default)]
+    pub connect_under_reset: bool,
+    #[serde(default)]
+    pub speed: Option<u32>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

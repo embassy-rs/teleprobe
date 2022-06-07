@@ -168,9 +168,9 @@ async fn handle_run(
 
     let probe = probe::Opts {
         chip: target.chip.clone(),
-        connect_under_reset: false,
+        connect_under_reset: target.connect_under_reset,
         probe: Some(target.probe.clone()),
-        speed: None,
+        speed: target.speed,
     };
 
     let (ok, logs) = run_with_log_capture(elf, probe).await;
