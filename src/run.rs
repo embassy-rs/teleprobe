@@ -175,14 +175,17 @@ impl Runner {
                 // "fake-flashing to RAM" is what initializes it.
                 core.write_word_32(rtt_addr, 0xdeadc0de)?;
 
+                // RTT control block is initialized pre-main. Run until main before
+                // changing to BlockIfFull.
                 core.set_hw_breakpoint(main_addr)?;
                 core.run()?;
                 core.wait_for_core_halted(Duration::from_secs(5))?;
-                const OFFSET: u32 = 44;
-                const FLAG: u32 = 2; // BLOCK_IF_FULL
-                core.write_word_32(rtt_addr + OFFSET, FLAG)?;
                 core.clear_hw_breakpoint(main_addr)?;
             }
+
+            const OFFSET: u32 = 44;
+            const FLAG: u32 = 2; // BLOCK_IF_FULL
+            core.write_word_32(rtt_addr + OFFSET, FLAG)?;
 
             if run_from_ram {
                 core.write_8(vector_table.hard_fault & !THUMB_BIT, &[0x00, 0xbe])?;
