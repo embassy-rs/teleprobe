@@ -214,6 +214,10 @@ async fn handle_home(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
 
     let mut res = String::new();
 
+    write!(&mut res, "<html>").unwrap();
+    write!(&mut res, "<head><title>Teleprobe Status</title></head>").unwrap();
+    write!(&mut res, "<body>").unwrap();
+    write!(&mut res, "<h1>Teleprobe Status</h1>").unwrap();
     write!(&mut res, "<table>").unwrap();
     write!(&mut res, "<tr>").unwrap();
     write!(&mut res, "<th>Name</th>").unwrap();
@@ -229,6 +233,13 @@ async fn handle_home(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
         write!(&mut res, "</tr>").unwrap();
     }
     write!(&mut res, "</table>").unwrap();
+    write!(
+        &mut res,
+        "<br><br> -- <a href=\"https://github.com/embassy-rs/teleprobe\">Teleprobe</a> version {}",
+        crate::meta::LONG_VERSION
+    )
+    .unwrap();
+    write!(&mut res, "</body></html>").unwrap();
 
     Ok(html(res))
 }

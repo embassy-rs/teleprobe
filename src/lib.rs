@@ -7,3 +7,5 @@ pub mod probe;
 pub mod run;
 pub mod server;
 pub mod util;
+
+include!(concat!(env!("OUT_DIR"), "/meta.rs"));
