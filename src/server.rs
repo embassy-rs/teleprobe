@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,7 +12,7 @@ use probe_rs::Probe;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
-use warp::reply::with_status;
+use warp::reply::{html, with_status};
 use warp::{Filter, Rejection, Reply};
 
 use crate::auth::oidc;
@@ -208,6 +209,30 @@ async fn handle_list_targets(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Reje
     ))
 }
 
+async fn handle_home(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
+    let targets = targets(cx);
+
+    let mut res = String::new();
+
+    write!(&mut res, "<table>").unwrap();
+    write!(&mut res, "<tr>").unwrap();
+    write!(&mut res, "<th>Name</th>").unwrap();
+    write!(&mut res, "<th>Chip</th>").unwrap();
+    write!(&mut res, "<th>Up</th>").unwrap();
+    write!(&mut res, "</tr>").unwrap();
+
+    for target in targets.targets {
+        write!(&mut res, "<tr>").unwrap();
+        write!(&mut res, "<td>{}</td>", target.name).unwrap();
+        write!(&mut res, "<td>{}</td>", target.chip).unwrap();
+        write!(&mut res, "<td>{}</td>", target.up).unwrap();
+        write!(&mut res, "</tr>").unwrap();
+    }
+    write!(&mut res, "</table>").unwrap();
+
+    Ok(html(res))
+}
+
 #[derive(Clone)]
 struct Context {
     oidc_client: Option<oidc::Client>,
@@ -247,8 +272,15 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .and(with_val(context.clone()))
         .and_then(handle_list_targets);
 
+    let home: _ = warp::path!()
+        .and(warp::get())
+        .and(with_val(context.clone()))
+        .and_then(handle_home);
+
     info!("Listening on :{}", port);
-    warp::serve(target_run.or(list_targets)).run(([0, 0, 0, 0], port)).await;
+    warp::serve(target_run.or(list_targets).or(home))
+        .run(([0, 0, 0, 0], port))
+        .await;
 
     Ok(())
 }
