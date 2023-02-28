@@ -68,21 +68,13 @@ fn main() -> anyhow::Result<()> {
             configure_logger();
             run_future(teleprobe::server::serve(port))?
         }
-        Cli::Client {
-            token,
-            host,
-            command,
-        } => {
+        Cli::Client { token, host, command } => {
             if !host.starts_with("http") {
                 anyhow::bail!("Host must start with `http`.");
             }
             match command {
-                ClientCommand::ListTargets => {
-                    run_future(teleprobe::client::list_targets(&host, &token))?
-                }
-                ClientCommand::Run { elf, target } => {
-                    run_future(teleprobe::client::run(&host, &token, &target, &elf))?
-                }
+                ClientCommand::ListTargets => run_future(teleprobe::client::list_targets(&host, &token))?,
+                ClientCommand::Run { elf, target } => run_future(teleprobe::client::run(&host, &token, &target, &elf))?,
             }
         }
     }

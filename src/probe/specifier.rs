@@ -1,6 +1,7 @@
+use std::str::FromStr;
+
 use anyhow::anyhow;
 use serde::{de, Deserialize, Deserializer, Serialize};
-use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub struct ProbeSpecifier {
@@ -27,9 +28,7 @@ impl Serialize for ProbeSpecifier {
             (None, None) => panic!("Invalid probe filter"),
             (None, Some(serial)) => serializer.serialize_str(serial),
             (Some((vid, pid)), None) => serializer.serialize_str(&format!("{:x}:{:x}", vid, pid)),
-            (Some((vid, pid)), Some(serial)) => {
-                serializer.serialize_str(&format!("{:x}:{:x}:{}", vid, pid, serial))
-            }
+            (Some((vid, pid)), Some(serial)) => serializer.serialize_str(&format!("{:x}:{:x}:{}", vid, pid, serial)),
         }
     }
 }

@@ -3,7 +3,6 @@ mod specifier;
 use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, Permissions, Probe, Session};
-
 pub use specifier::ProbeSpecifier;
 
 #[derive(Clone, Parser)]
@@ -36,9 +35,7 @@ pub fn list() -> Result<()> {
             "{:04x}:{:04x}:{} -- {:?} {}",
             probe.vendor_id,
             probe.product_id,
-            probe
-                .serial_number
-                .unwrap_or_else(|| "SN unspecified".to_string()),
+            probe.serial_number.unwrap_or_else(|| "SN unspecified".to_string()),
             probe.probe_type,
             probe.identifier,
         );

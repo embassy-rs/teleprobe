@@ -1,3 +1,8 @@
+use std::collections::BTreeMap;
+use std::convert::TryInto;
+use std::io::Cursor;
+use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, bail};
 use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
@@ -5,10 +10,6 @@ use object::ObjectSymbol;
 use probe_rs::flashing::DownloadOptions;
 use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
-use std::collections::BTreeMap;
-use std::convert::TryInto;
-use std::io::Cursor;
-use std::time::{Duration, Instant};
 
 pub const LR: RegisterId = RegisterId(14);
 pub const PC: RegisterId = RegisterId(15);
@@ -108,8 +109,7 @@ impl Runner {
             }
         }
 
-        let vector_table =
-            vector_table.ok_or_else(|| anyhow!("`.vector_table` section is missing"))?;
+        let vector_table = vector_table.ok_or_else(|| anyhow!("`.vector_table` section is missing"))?;
         log::debug!("vector table: {:x?}", vector_table);
 
         //let run_from_ram = vector_table.location >= 0x2000_0000;
@@ -371,8 +371,7 @@ fn dump_state(core: &mut Core) -> anyhow::Result<bool> {
 
 fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<UpChannel> {
     const NUM_RETRIES: usize = 10; // picked at random, increase if necessary
-    let mut rtt_res: Result<Rtt, probe_rs::rtt::Error> =
-        Err(probe_rs::rtt::Error::ControlBlockNotFound);
+    let mut rtt_res: Result<Rtt, probe_rs::rtt::Error> = Err(probe_rs::rtt::Error::ControlBlockNotFound);
 
     let memory_map = sess.target().memory_map.clone();
     let mut core = sess.core(0).unwrap();
@@ -386,7 +385,9 @@ fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Up
             }
             Err(probe_rs::rtt::Error::ControlBlockNotFound) => {
                 if try_index < NUM_RETRIES {
-                    log::trace!("Could not attach because the target's RTT control block isn't initialized (yet). retrying");
+                    log::trace!(
+                        "Could not attach because the target's RTT control block isn't initialized (yet). retrying"
+                    );
                 } else {
                     log::error!("Max number of RTT attach retries exceeded.");
                     return Err(anyhow!(probe_rs::rtt::Error::ControlBlockNotFound));

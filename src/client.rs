@@ -1,5 +1,6 @@
-use crate::config::TargetList;
 use anyhow::bail;
+
+use crate::config::TargetList;
 
 pub async fn run(host: &str, token: &str, target: &str, elf: &str) -> anyhow::Result<()> {
     let raw = std::fs::read(elf)?;
@@ -17,10 +18,7 @@ pub async fn run(host: &str, token: &str, target: &str, elf: &str) -> anyhow::Re
         println!("Succesfully ran the elf on the target device.");
         println!("Teleprobe response");
         println!("==================");
-        println!(
-            "{}",
-            res.text().await.unwrap_or_else(|_| "empty".to_string())
-        );
+        println!("{}", res.text().await.unwrap_or_else(|_| "empty".to_string()));
         Ok(())
     } else {
         println!("Error running the elf on the target device.status code");

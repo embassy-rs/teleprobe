@@ -6,16 +6,16 @@ use std::time::{Duration, Instant};
 use anyhow::bail;
 use bytes::Bytes;
 use log::{error, info};
-
 use parking_lot::Mutex;
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
 use warp::reply::with_status;
 use warp::{Filter, Rejection, Reply};
 
+use crate::auth::oidc;
 use crate::auth::oidc::Client;
 use crate::config::{Auth, Config, OidcAuthRule, TargetList};
-use crate::{auth::oidc, probe, run};
+use crate::{probe, run};
 
 const DEFAULT_LOG_FILTER: &str = "info,device=trace";
 
@@ -33,13 +33,11 @@ fn run_firmware_on_device(elf: Bytes, probe: probe::Opts) -> anyhow::Result<()> 
 
 async fn run_with_log_capture(elf: Bytes, probe: probe::Opts) -> (bool, Vec<u8>) {
     spawn_blocking(move || {
-        crate::logging::capture::with_capture(DEFAULT_LOG_FILTER, || {
-            match run_firmware_on_device(elf, probe) {
-                Ok(()) => true,
-                Err(e) => {
-                    error!("Run failed: {}", e);
-                    false
-                }
+        crate::logging::capture::with_capture(DEFAULT_LOG_FILTER, || match run_firmware_on_device(elf, probe) {
+            Ok(()) => true,
+            Err(e) => {
+                error!("Run failed: {}", e);
+                false
             }
         })
     })
@@ -59,11 +57,7 @@ macro_rules! reject {
     };
 }
 
-fn check_auth_token(
-    oidc_client: Option<&Client>,
-    token: &str,
-    auth: &Auth,
-) -> Result<(), anyhow::Error> {
+fn check_auth_token(oidc_client: Option<&Client>, token: &str, auth: &Auth) -> Result<(), anyhow::Error> {
     match auth {
         Auth::Token(auth) => {
             if token != auth.token {
@@ -73,8 +67,7 @@ fn check_auth_token(
         }
         Auth::Oidc(auth) => {
             if let Some(client) = &oidc_client {
-                let claims: HashMap<String, serde_json::Value> = match client.validate_token(token)
-                {
+                let claims: HashMap<String, serde_json::Value> = match client.validate_token(token) {
                     Ok(x) => x,
                     Err(e) => bail!("Bad token: {}", e),
                 };
@@ -143,9 +136,7 @@ async fn check_auth(auth_header: String, cx: Arc<Mutex<Context>>) -> Result<(), 
     Ok(())
 }
 
-fn check_auth_filter(
-    cx: Arc<Mutex<Context>>,
-) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+fn check_auth_filter(cx: Arc<Mutex<Context>>) -> impl Filter<Extract = (), Error = Rejection> + Clone {
     let with_context = warp::any().map(move || cx.clone());
     warp::header("Authorization")
         .and(with_context)
@@ -153,11 +144,7 @@ fn check_auth_filter(
         .untuple_one()
 }
 
-async fn handle_run(
-    name: String,
-    elf: Bytes,
-    cx: Arc<Mutex<Context>>,
-) -> Result<impl Reply, Rejection> {
+async fn handle_run(name: String, elf: Bytes, cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
     let target = {
         let context = cx.lock();
         match context.config.targets.iter().find(|t| t.name == name) {
@@ -174,11 +161,7 @@ async fn handle_run(
     };
 
     let (ok, logs) = run_with_log_capture(elf, probe).await;
-    let status = if ok {
-        StatusCode::OK
-    } else {
-        StatusCode::BAD_REQUEST
-    };
+    let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
 
     Ok(with_status(logs, status))
 }
@@ -214,10 +197,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         None => None,
     };
 
-    let context: Arc<Mutex<Context>> = Arc::new(Mutex::new(Context {
-        oidc_client,
-        config,
-    }));
+    let context: Arc<Mutex<Context>> = Arc::new(Mutex::new(Context { oidc_client, config }));
 
     let target_run: _ = warp::path!("targets" / String / "run")
         .and(warp::post())
@@ -233,15 +213,11 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .and_then(handle_list_targets);
 
     info!("Listening on :{}", port);
-    warp::serve(target_run.or(list_targets))
-        .run(([0, 0, 0, 0], port))
-        .await;
+    warp::serve(target_run.or(list_targets)).run(([0, 0, 0, 0], port)).await;
 
     Ok(())
 }
 
-fn with_val<T: Clone + Send>(
-    val: T,
-) -> impl Filter<Extract = (T,), Error = std::convert::Infallible> + Clone {
+fn with_val<T: Clone + Send>(val: T) -> impl Filter<Extract = (T,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || val.clone())
 }

@@ -4,8 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 mod base64 {
-    use serde::{Deserialize, Serialize};
-    use serde::{Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
         let base64 = base64::encode(v);
