@@ -83,8 +83,8 @@ impl Client {
         match header.alg {
             Algorithm::RS256 => {
                 let mut validation = Validation::new(key.alg);
-                validation.iss = Some(self.oidc_config.issuer.clone());
-                let key = DecodingKey::from_rsa_components(&key.n, &key.e);
+                validation.set_issuer(&[&self.oidc_config.issuer]);
+                let key = DecodingKey::from_rsa_components(&key.n, &key.e).unwrap();
                 let decoded = jsonwebtoken::decode::<T>(token, &key, &validation)?;
                 Ok(decoded.claims)
             }

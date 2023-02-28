@@ -6,22 +6,21 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.44"
-base64 = "0.13.0"
-bytes = "1.1.0"
-clap = { version = "3.1.5", features = ["derive", "env"]}
-defmt-decoder = { version = "0.3.0", features = [ "unstable" ]}
-env_logger = "0.9.0"
-jsonwebtoken = "7.2.0"
-log = "0.4.14"
-object = "0.27.1"
-probe-rs = "0.12.0"
-probe-rs-rtt = "0.12.0"
-reqwest = { version = "0.11.6", features = ["json"]}
-serde = "1.0.130"
-serde_json = "1.0.68"
-serde_yaml = "0.8.21"
+anyhow = "1.0.69"
+base64 = "0.21.0"
+bytes = "1.4.0"
+clap = { version = "4.1.8", features = ["derive", "env"]}
+defmt-decoder = { version = "0.3.4", features = [ "unstable" ]}
+env_logger = "0.10.0"
+jsonwebtoken = "8.2.0"
+log = "0.4.17"
+object = "0.30.3"
+probe-rs = "0.17.0"
+reqwest = { version = "0.11.14", features = ["json"]}
+serde = "1.0.152"
+serde_json = "1.0.93"
+serde_yaml = "0.9.17"
 tokio = { version = "1", features = ["full"] }
-url = "2.2.2"
+url = "2.3.1"
 warp = "0.3"
 parking_lot = "0.12"

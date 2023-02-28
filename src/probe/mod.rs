@@ -2,7 +2,7 @@ mod specifier;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use probe_rs::{DebugProbeInfo, Probe, Session};
+use probe_rs::{DebugProbeInfo, Permissions, Probe, Session};
 
 pub use specifier::ProbeSpecifier;
 
@@ -71,12 +71,14 @@ pub fn connect(opts: Opts) -> Result<Session> {
         probe.set_speed(speed)?;
     }
 
+    let perms = Permissions::new().allow_erase_all();
+
     let target = probe_rs::config::get_target_by_name(&opts.chip)?;
 
     let sess = if opts.connect_under_reset {
-        probe.attach_under_reset(target)?
+        probe.attach_under_reset(target, perms)?
     } else {
-        probe.attach(target)?
+        probe.attach(target, perms)?
     };
     log::debug!("started session");
 

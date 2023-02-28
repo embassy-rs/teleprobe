@@ -3,18 +3,17 @@ use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
 use probe_rs::flashing::DownloadOptions;
-use probe_rs::CoreRegisterAddress;
-use probe_rs::{Core, MemoryInterface, Session};
-use probe_rs_rtt::{Rtt, ScanRegion, UpChannel};
+use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
+use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
-pub const LR: CoreRegisterAddress = CoreRegisterAddress(14);
-pub const PC: CoreRegisterAddress = CoreRegisterAddress(15);
-pub const SP: CoreRegisterAddress = CoreRegisterAddress(13);
-pub const XPSR: CoreRegisterAddress = CoreRegisterAddress(16);
+pub const LR: RegisterId = RegisterId(14);
+pub const PC: RegisterId = RegisterId(15);
+pub const SP: RegisterId = RegisterId(13);
+pub const XPSR: RegisterId = RegisterId(16);
 
 const THUMB_BIT: u32 = 1;
 const TIMEOUT: Duration = Duration::from_secs(1);
@@ -113,7 +112,8 @@ impl Runner {
             vector_table.ok_or_else(|| anyhow!("`.vector_table` section is missing"))?;
         log::debug!("vector table: {:x?}", vector_table);
 
-        let run_from_ram = vector_table.location >= 0x2000_0000;
+        //let run_from_ram = vector_table.location >= 0x2000_0000;
+        let run_from_ram = true;
 
         if !opts.do_flash {
             log::info!("skipped flashing");
@@ -145,14 +145,14 @@ impl Runner {
                 // https://www.st.com/resource/en/application_note/dm00623136-error-correction-code-ecc-management-for-internal-memories-protection-on-stm32h7-series-stmicroelectronics.pdf
                 //
                 // Do one dummy write to ensure the last word sticks.
-                let data = core.read_word_32(vector_table.location)?;
-                core.write_word_32(vector_table.location, data)?;
+                let data = core.read_word_32(vector_table.location as _)?;
+                core.write_word_32(vector_table.location as _, data)?;
             }
 
             core.reset_and_halt(TIMEOUT)?;
 
             log::debug!("starting device");
-            if core.get_available_breakpoint_units()? == 0 {
+            if core.available_breakpoint_units()? == 0 {
                 bail!("RTT not supported on device without HW breakpoints");
             }
 
@@ -173,24 +173,24 @@ impl Runner {
                 // Corrupt the rtt control block so that it's setup fresh again
                 // Only do this when running from flash, because when running from RAM the
                 // "fake-flashing to RAM" is what initializes it.
-                core.write_word_32(rtt_addr, 0xdeadc0de)?;
+                core.write_word_32(rtt_addr as _, 0xdeadc0de)?;
 
                 // RTT control block is initialized pre-main. Run until main before
                 // changing to BlockIfFull.
-                core.set_hw_breakpoint(main_addr)?;
+                core.set_hw_breakpoint(main_addr as _)?;
                 core.run()?;
                 core.wait_for_core_halted(Duration::from_secs(5))?;
-                core.clear_hw_breakpoint(main_addr)?;
+                core.clear_hw_breakpoint(main_addr as _)?;
             }
 
             const OFFSET: u32 = 44;
             const FLAG: u32 = 2; // BLOCK_IF_FULL
-            core.write_word_32(rtt_addr + OFFSET, FLAG)?;
+            core.write_word_32((rtt_addr + OFFSET) as _, FLAG)?;
 
             if run_from_ram {
-                core.write_8(vector_table.hard_fault & !THUMB_BIT, &[0x00, 0xbe])?;
+                core.write_8((vector_table.hard_fault & !THUMB_BIT) as _, &[0x00, 0xbe])?;
             } else {
-                core.set_hw_breakpoint(vector_table.hard_fault & !THUMB_BIT)?;
+                core.set_hw_breakpoint((vector_table.hard_fault & !THUMB_BIT) as _)?;
             }
 
             core.run()?;
@@ -306,13 +306,13 @@ impl Runner {
 }
 
 fn dump_state(core: &mut Core) -> anyhow::Result<bool> {
-    let _pc = core.read_core_reg(core.registers().program_counter())?;
+    let _pc: u32 = core.read_core_reg(PC)?;
     //println!("Core halted at address {:#010x}", pc);
 
     // determine if the target is handling an interupt
 
     // TODO: Proper address
-    let xpsr = core.read_core_reg(XPSR)?;
+    let xpsr: u32 = core.read_core_reg(XPSR)?;
     //println!("XPSR: {:#010x}", xpsr);
 
     let exception_number = xpsr & 0xff;
@@ -324,7 +324,7 @@ fn dump_state(core: &mut Core) -> anyhow::Result<bool> {
         3 => {
             println!("Hard Fault!");
 
-            let return_address = core.read_core_reg(core.registers().return_address())?;
+            let return_address: u32 = core.read_core_reg(LR)?;
 
             println!("Return address (LR): {:#010x}", return_address);
 
@@ -371,8 +371,8 @@ fn dump_state(core: &mut Core) -> anyhow::Result<bool> {
 
 fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<UpChannel> {
     const NUM_RETRIES: usize = 10; // picked at random, increase if necessary
-    let mut rtt_res: Result<Rtt, probe_rs_rtt::Error> =
-        Err(probe_rs_rtt::Error::ControlBlockNotFound);
+    let mut rtt_res: Result<Rtt, probe_rs::rtt::Error> =
+        Err(probe_rs::rtt::Error::ControlBlockNotFound);
 
     let memory_map = sess.target().memory_map.clone();
     let mut core = sess.core(0).unwrap();
@@ -384,12 +384,12 @@ fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Up
                 log::debug!("Successfully attached RTT");
                 break;
             }
-            Err(probe_rs_rtt::Error::ControlBlockNotFound) => {
+            Err(probe_rs::rtt::Error::ControlBlockNotFound) => {
                 if try_index < NUM_RETRIES {
                     log::trace!("Could not attach because the target's RTT control block isn't initialized (yet). retrying");
                 } else {
                     log::error!("Max number of RTT attach retries exceeded.");
-                    return Err(anyhow!(probe_rs_rtt::Error::ControlBlockNotFound));
+                    return Err(anyhow!(probe_rs::rtt::Error::ControlBlockNotFound));
                 }
             }
             Err(e) => {
