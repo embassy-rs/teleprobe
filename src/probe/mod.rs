@@ -82,7 +82,7 @@ pub fn connect(opts: Opts) -> Result<Session> {
     Ok(sess)
 }
 
-fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Vec<DebugProbeInfo> {
+pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Vec<DebugProbeInfo> {
     probes
         .iter()
         .filter(|&p| {

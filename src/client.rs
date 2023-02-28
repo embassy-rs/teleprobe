@@ -1,6 +1,6 @@
 use anyhow::bail;
 
-use crate::config::TargetList;
+use crate::api;
 
 pub async fn run(host: &str, token: &str, target: &str, elf: &str) -> anyhow::Result<()> {
     let raw = std::fs::read(elf)?;
@@ -45,12 +45,14 @@ pub async fn list_targets(host: &str, token: &str) -> anyhow::Result<()> {
 
     if res.status().is_success() {
         println!("Teleprobe server supports the following targets:");
+        println!("{:20} {:14} {:6}", "name", "chip", "up");
+
         let text = res.text().await?;
-        let targets: TargetList = serde_json::from_str(&text)?;
+        let targets: api::TargetList = serde_json::from_str(&text)?;
         let targets: Vec<String> = targets
             .targets
             .iter()
-            .map(|target| format!("{}:{}", target.name, target.chip))
+            .map(|target| format!("{:20} {:14} {:6}", target.name, target.chip, target.up))
             .collect();
         println!("{}", targets.join("\n"));
         Ok(())

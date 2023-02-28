@@ -7,6 +7,7 @@ use anyhow::bail;
 use bytes::Bytes;
 use log::{error, info};
 use parking_lot::Mutex;
+use probe_rs::Probe;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
@@ -15,8 +16,9 @@ use warp::{Filter, Rejection, Reply};
 
 use crate::auth::oidc;
 use crate::auth::oidc::Client;
-use crate::config::{Auth, Config, OidcAuthRule, TargetList};
-use crate::{probe, run};
+use crate::config::{Auth, Config, OidcAuthRule};
+use crate::probe::probes_filter;
+use crate::{api, probe, run};
 
 const DEFAULT_LOG_FILTER: &str = "info,device=trace";
 
@@ -176,10 +178,28 @@ async fn handle_run(name: String, elf: Bytes, cx: Arc<Mutex<Context>>) -> Result
     Ok(with_status(logs, status))
 }
 
+fn targets(cx: Arc<Mutex<Context>>) -> api::TargetList {
+    let targets = cx.lock().config.targets.clone();
+    let mut res = Vec::new();
+    let up_probes = Probe::list_all();
+
+    for target in targets {
+        let is_up = !probes_filter(&up_probes, &target.probe).is_empty();
+        res.push(api::Target {
+            name: target.name,
+            chip: target.chip,
+            probe: target.probe,
+            connect_under_reset: target.connect_under_reset,
+            speed: target.speed,
+            up: is_up,
+        });
+    }
+
+    api::TargetList { targets: res }
+}
+
 async fn handle_list_targets(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
-    let targets = TargetList {
-        targets: cx.lock().config.targets.clone(),
-    };
+    let targets = targets(cx);
 
     Ok(with_status(
         // NOTE (unwrap): error in this call is caused by programmer error and should never be caused by the user data
