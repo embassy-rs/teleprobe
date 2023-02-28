@@ -7,6 +7,7 @@ use anyhow::bail;
 use bytes::Bytes;
 use log::{error, info};
 use parking_lot::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
 use warp::reply::with_status;
@@ -153,6 +154,15 @@ async fn handle_run(name: String, elf: Bytes, cx: Arc<Mutex<Context>>) -> Result
         }
     };
 
+    let target_mutex = cx
+        .lock()
+        .target_locks
+        .entry(target.name.clone())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone();
+
+    let _target_guard = target_mutex.lock().await;
+
     let probe = probe::Opts {
         chip: target.chip.clone(),
         connect_under_reset: target.connect_under_reset,
@@ -182,6 +192,7 @@ async fn handle_list_targets(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Reje
 struct Context {
     oidc_client: Option<oidc::Client>,
     config: Config,
+    target_locks: HashMap<String, Arc<AsyncMutex<()>>>,
 }
 
 pub async fn serve(port: u16) -> anyhow::Result<()> {
@@ -197,7 +208,11 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         None => None,
     };
 
-    let context: Arc<Mutex<Context>> = Arc::new(Mutex::new(Context { oidc_client, config }));
+    let context: Arc<Mutex<Context>> = Arc::new(Mutex::new(Context {
+        oidc_client,
+        config,
+        target_locks: HashMap::new(),
+    }));
 
     let target_run: _ = warp::path!("targets" / String / "run")
         .and(warp::post())
