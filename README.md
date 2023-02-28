@@ -33,15 +33,15 @@ Server configuration is stored in a file called `config.yaml`. It contains both 
 An example configuration can be seen in the following snippet:
 ```
 auths:
-  - oidc:
-      issuer: https://token.actions.githubusercontent.com
-      rules:
-        - claims:
-            iss: https://token.actions.githubusercontent.com
-            aud: https://github.com/embassy-rs
-            repository: embassy-rs/embassy
-  - token:
-      token: hN6e2msKlqsW9smsjyF5I7xmiuPQij0O
+  - !oidc
+    issuer: https://token.actions.githubusercontent.com
+    rules:
+      - claims:
+          iss: https://token.actions.githubusercontent.com
+          aud: https://github.com/embassy-rs
+          repository: embassy-rs/embassy
+  - !token
+    token: hN6e2msKlqsW9smsjyF5I7xmiuPQij0O
 targets:
   - name: nucleo-stm32f429zi
     chip: stm32f429zitx
@@ -62,3 +62,14 @@ teleprobe client --host 'http://SERVER_ADDRESS:8080' --token ACCESS_TOKEN run --
 ```
 
 The `ACCESS_TOKEN` and host can be also stored into `TELEPROBE_TOKEN` and `TELEPROBE_HOST` environment variables.
+
+## License
+
+This work is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
