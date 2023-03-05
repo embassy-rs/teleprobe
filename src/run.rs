@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 use std::convert::TryInto;
+use std::fmt::Write;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
+use log::{info, warn};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
+use probe_rs::debug::DebugInfo;
 use probe_rs::flashing::DownloadOptions;
 use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
@@ -50,6 +53,8 @@ struct Runner {
     defmt_table: Box<Table>,
     defmt_locs: BTreeMap<u64, Location>,
     defmt_stream: Box<dyn StreamDecoder>,
+
+    di: DebugInfo,
 }
 
 unsafe fn fuck_it<'a, 'b, T>(wtf: &'a T) -> &'b T {
@@ -59,6 +64,8 @@ unsafe fn fuck_it<'a, 'b, T>(wtf: &'a T) -> &'b T {
 impl Runner {
     fn new(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Result<Self> {
         let elf = ElfFile::parse(elf_bytes)?;
+
+        let di = DebugInfo::from_raw(elf_bytes)?;
 
         let table = Box::new(defmt_decoder::Table::parse(elf_bytes)?.unwrap());
         let locs = table.get_locations(elf_bytes)?;
@@ -209,6 +216,7 @@ impl Runner {
             defmt_locs: locs,
             defmt,
             defmt_stream,
+            di,
         })
     }
 
@@ -277,6 +285,9 @@ impl Runner {
         loop {
             if let Some(deadline) = self.opts.deadline {
                 if Instant::now() > deadline {
+                    warn!("Deadline exceeded!");
+                    let mut core = sess.core(0)?;
+                    self.dump_state(&mut core, true)?;
                     bail!("Deadline exceeded")
                 }
             }
@@ -294,77 +305,150 @@ impl Runner {
 
         let mut core = sess.core(0)?;
 
-        core.halt(TIMEOUT)?;
-
-        let is_hardfault = dump_state(&mut core)?;
+        let is_hardfault = self.dump_state(&mut core, false)?;
         if is_hardfault {
             bail!("Firmware crashed");
         }
 
         Ok(())
     }
-}
 
-fn dump_state(core: &mut Core) -> anyhow::Result<bool> {
-    let _pc: u32 = core.read_core_reg(PC)?;
-    //println!("Core halted at address {:#010x}", pc);
+    fn traceback(&mut self, core: &mut Core) -> anyhow::Result<()> {
+        info!(
+            "  R0: {:08x}   R1: {:08x}   R2: {:08x}   R3: {:08x}",
+            core.read_core_reg::<u32>(0)?,
+            core.read_core_reg::<u32>(1)?,
+            core.read_core_reg::<u32>(2)?,
+            core.read_core_reg::<u32>(3)?,
+        );
+        info!(
+            "  R4: {:08x}   R5: {:08x}   R6: {:08x}   R7: {:08x}",
+            core.read_core_reg::<u32>(4)?,
+            core.read_core_reg::<u32>(5)?,
+            core.read_core_reg::<u32>(6)?,
+            core.read_core_reg::<u32>(7)?,
+        );
+        info!(
+            "  R8: {:08x}   R9: {:08x}  R10: {:08x}  R11: {:08x}",
+            core.read_core_reg::<u32>(8)?,
+            core.read_core_reg::<u32>(9)?,
+            core.read_core_reg::<u32>(10)?,
+            core.read_core_reg::<u32>(11)?,
+        );
+        info!(
+            " R12: {:08x}   SP: {:08x}   LR: {:08x}   PC: {:08x}",
+            core.read_core_reg::<u32>(12)?,
+            core.read_core_reg::<u32>(13)?,
+            core.read_core_reg::<u32>(14)?,
+            core.read_core_reg::<u32>(15)?,
+        );
+        info!("XPSR: {:08x}", core.read_core_reg::<u32>(XPSR)?);
 
-    // determine if the target is handling an interupt
+        let program_counter: u64 = core.read_core_reg(15)?;
 
-    // TODO: Proper address
-    let xpsr: u32 = core.read_core_reg(XPSR)?;
-    //println!("XPSR: {:#010x}", xpsr);
+        let di = &self.di;
+        let stack_frames = di.unwind(core, program_counter).unwrap();
 
-    let exception_number = xpsr & 0xff;
-    match exception_number {
-        0 => {
-            //println!("No exception!");
-            Ok(false)
-        }
-        3 => {
-            println!("Hard Fault!");
+        for (i, frame) in stack_frames.iter().enumerate() {
+            let mut s = String::new();
+            write!(&mut s, "Frame {}: {} @ {}", i, frame.function_name, frame.pc).unwrap();
 
-            let return_address: u32 = core.read_core_reg(LR)?;
+            if frame.is_inlined {
+                write!(&mut s, " inline").unwrap();
+            }
 
-            println!("Return address (LR): {:#010x}", return_address);
+            if let Some(location) = &frame.source_location {
+                if location.directory.is_some() || location.file.is_some() {
+                    write!(&mut s, "\n       ").unwrap();
 
-            // Get reason for hard fault
-            let hfsr = core.read_word_32(0xE000_ED2C)?;
+                    if let Some(dir) = &location.directory {
+                        write!(&mut s, "{}", dir.display()).unwrap();
+                    }
 
-            if hfsr & (1 << 30) == (1 << 30) {
-                println!("-> configurable priority exception has been escalated to hard fault!");
+                    if let Some(file) = &location.file {
+                        write!(&mut s, "/{file}").unwrap();
 
-                // read cfsr
-                let cfsr = core.read_word_32(0xE000_ED28)?;
+                        if let Some(line) = location.line {
+                            write!(&mut s, ":{line}").unwrap();
 
-                let ufsr = (cfsr >> 16) & 0xffff;
-                let bfsr = (cfsr >> 8) & 0xff;
-                let mmfsr = (cfsr) & 0xff;
-
-                if ufsr != 0 {
-                    println!("\tUsage Fault     - UFSR: {:#06x}", ufsr);
-                }
-
-                if bfsr != 0 {
-                    println!("\tBus Fault       - BFSR: {:#04x}", bfsr);
-
-                    if bfsr & (1 << 7) == (1 << 7) {
-                        // Read address from BFAR
-                        let bfar = core.read_word_32(0xE000_ED38)?;
-                        println!("\t Location       - BFAR: {:#010x}", bfar);
+                            if let Some(col) = location.column {
+                                match col {
+                                    probe_rs::debug::ColumnType::LeftEdge => {
+                                        write!(&mut s, ":1").unwrap();
+                                    }
+                                    probe_rs::debug::ColumnType::Column(c) => {
+                                        write!(&mut s, ":{c}").unwrap();
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-
-                if mmfsr != 0 {
-                    println!("\tMemManage Fault - BFSR: {:04x}", bfsr);
-                }
             }
-            Ok(true)
+
+            info!("{}", s);
         }
-        // Ignore other exceptions for now
-        _ => {
-            println!("Exception {}", exception_number);
-            Ok(false)
+
+        Ok(())
+    }
+
+    fn dump_state(&mut self, core: &mut Core, force: bool) -> anyhow::Result<bool> {
+        core.halt(TIMEOUT)?;
+
+        // determine if the target is handling an interupt
+        let xpsr: u32 = core.read_core_reg(XPSR)?;
+        let exception_number = xpsr & 0xff;
+        match exception_number {
+            0 => {
+                //info!("No exception!");
+                if force {
+                    self.traceback(core)?;
+                }
+                Ok(false)
+            }
+            3 => {
+                self.traceback(core)?;
+                info!("Hard Fault!");
+
+                // Get reason for hard fault
+                let hfsr = core.read_word_32(0xE000_ED2C)?;
+
+                if hfsr & (1 << 30) != 0 {
+                    info!("-> configurable priority exception has been escalated to hard fault!");
+
+                    // read cfsr
+                    let cfsr = core.read_word_32(0xE000_ED28)?;
+
+                    let ufsr = (cfsr >> 16) & 0xffff;
+                    let bfsr = (cfsr >> 8) & 0xff;
+                    let mmfsr = (cfsr) & 0xff;
+
+                    if ufsr != 0 {
+                        info!("\tUsage Fault     - UFSR: {:#06x}", ufsr);
+                    }
+
+                    if bfsr != 0 {
+                        info!("\tBus Fault       - BFSR: {:#04x}", bfsr);
+
+                        if bfsr & (1 << 7) != 0 {
+                            // Read address from BFAR
+                            let bfar = core.read_word_32(0xE000_ED38)?;
+                            info!("\t Location       - BFAR: {:#010x}", bfar);
+                        }
+                    }
+
+                    if mmfsr != 0 {
+                        info!("\tMemManage Fault - BFSR: {:04x}", bfsr);
+                    }
+                }
+                Ok(true)
+            }
+            // Ignore other exceptions for now
+            _ => {
+                self.traceback(core)?;
+                info!("Exception {}", exception_number);
+                Ok(false)
+            }
         }
     }
 }

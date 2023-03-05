@@ -40,7 +40,7 @@ async fn run_with_log_capture(elf: Bytes, probe: probe::Opts) -> (bool, Vec<u8>)
         crate::logging::capture::with_capture(DEFAULT_LOG_FILTER, || match run_firmware_on_device(elf, probe) {
             Ok(()) => true,
             Err(e) => {
-                error!("Run failed: {}", e);
+                error!("Run failed: {:?}", e);
                 false
             }
         })
