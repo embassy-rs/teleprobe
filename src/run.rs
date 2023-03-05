@@ -119,6 +119,14 @@ impl Runner {
         let vector_table = vector_table.ok_or_else(|| anyhow!("`.vector_table` section is missing"))?;
         log::debug!("vector table: {:x?}", vector_table);
 
+        // reset ALL cores other than the main one.
+        // This is needed for rp2040 core1.
+        for (i, _) in sess.list_cores() {
+            if i != 0 {
+                sess.core(i)?.reset()?;
+            }
+        }
+
         //let run_from_ram = vector_table.location >= 0x2000_0000;
         let run_from_ram = true;
 
