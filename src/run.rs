@@ -127,8 +127,8 @@ impl Runner {
             }
         }
 
-        //let run_from_ram = vector_table.location >= 0x2000_0000;
-        let run_from_ram = true;
+        let run_from_ram = vector_table.location >= 0x2000_0000;
+        //let run_from_ram = true;
 
         if !opts.do_flash {
             log::info!("skipped flashing");
