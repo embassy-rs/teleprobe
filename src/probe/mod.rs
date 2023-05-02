@@ -2,7 +2,7 @@ mod specifier;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use probe_rs::{DebugProbeInfo, Permissions, Probe, Session};
+use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
 pub use specifier::ProbeSpecifier;
 
 #[derive(Clone, Parser)]
@@ -61,6 +61,42 @@ pub fn connect(opts: Opts) -> Result<Session> {
         //let _ = print_probes(probes);
         bail!("more than one probe found; use --probe to specify which one to use");
     }
+
+    // GIANT HACK to reset both cores in rp2040.
+    // Ideally this would be a custom sequence in probe-rs:
+    // https://github.com/probe-rs/probe-rs/pull/1603
+    if opts.chip.to_ascii_uppercase().starts_with("RP2040") {
+        let mut probe = probes[0].open()?;
+        log::debug!("opened probe for rp2040 reset");
+
+        if let Some(speed) = opts.speed {
+            probe.set_speed(speed)?;
+        }
+
+        let perms = Permissions::new().allow_erase_all();
+        let target = probe_rs::config::get_target_by_name(&opts.chip)?;
+        let mut sess = probe.attach(target, perms)?;
+        let mut core = sess.core(0)?;
+
+        const PSM_FRCE_ON: u64 = 0x40010000;
+        const PSM_FRCE_OFF: u64 = 0x40010004;
+        const PSM_WDSEL: u64 = 0x40010008;
+
+        const PSM_SEL_SIO: u32 = 1 << 14;
+        const PSM_SEL_PROC0: u32 = 1 << 15;
+        const PSM_SEL_PROC1: u32 = 1 << 16;
+
+        const WATCHDOG_CTRL: u64 = 0x40058000;
+        const WATCHDOG_CTRL_TRIGGER: u32 = 1 << 31;
+        const WATCHDOG_CTRL_ENABLE: u32 = 1 << 30;
+
+        log::debug!("rp2040: resetting SIO and processors");
+        core.write_word_32(PSM_WDSEL, PSM_SEL_SIO | PSM_SEL_PROC0 | PSM_SEL_PROC1)?;
+        core.write_word_32(WATCHDOG_CTRL, WATCHDOG_CTRL_ENABLE)?;
+        core.write_word_32(WATCHDOG_CTRL, WATCHDOG_CTRL_ENABLE | WATCHDOG_CTRL_TRIGGER)?;
+        log::debug!("rp2040: reset done, reattaching");
+    }
+
     let mut probe = probes[0].open()?;
     log::debug!("opened probe");
 
