@@ -36,8 +36,8 @@ fn run_firmware_on_device(elf: Bytes, probe: probe::Opts) -> anyhow::Result<()> 
 }
 
 async fn run_with_log_capture(elf: Bytes, probe: probe::Opts) -> (bool, Vec<u8>) {
-    spawn_blocking(move || {
-        crate::logging::capture::with_capture(DEFAULT_LOG_FILTER, || match run_firmware_on_device(elf, probe) {
+    let (ok, entries) = spawn_blocking(move || {
+        crate::logutil::with_capture(|| match run_firmware_on_device(elf, probe) {
             Ok(()) => true,
             Err(e) => {
                 error!("Run failed: {:?}", e);
@@ -46,7 +46,13 @@ async fn run_with_log_capture(elf: Bytes, probe: probe::Opts) -> (bool, Vec<u8>)
         })
     })
     .await
-    .unwrap()
+    .unwrap();
+
+    let mut res = String::new();
+    for entry in entries {
+        writeln!(&mut res, "{} - {}", entry.level, entry.message).unwrap();
+    }
+    (ok, res.into_bytes())
 }
 
 macro_rules! reject {
