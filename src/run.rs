@@ -253,6 +253,11 @@ impl Runner {
                         mod_path = Some(loc.module.clone());
                     };
 
+                    let mut timestamp = String::new();
+                    if let Some(ts) = frame.display_timestamp() {
+                        timestamp = format!("{} ", ts);
+                    }
+
                     log::logger().log(
                         &log::Record::builder()
                             .level(match frame.level() {
@@ -270,7 +275,7 @@ impl Runner {
                             .line(line)
                             .target("device")
                             //.args(format_args!("{} {:?} {:?}", frame.display_message(), file, line))
-                            .args(format_args!("{}", frame.display_message()))
+                            .args(format_args!("{}{}", timestamp, frame.display_message()))
                             .build(),
                     );
                 }
