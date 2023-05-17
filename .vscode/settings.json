@@ -1,5 +1,8 @@
 {
     "editor.formatOnSave": true,
     "rust-analyzer.imports.granularity.enforce": true,
-    "rust-analyzer.imports.granularity.group": "module"
+    "rust-analyzer.imports.granularity.group": "module",
+    "rust-analyzer.linkedProjects": [
+        "./teleprobe/Cargo.toml",
+    ],
 }
