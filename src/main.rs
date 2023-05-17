@@ -24,10 +24,10 @@ enum Cli {
         port: u16,
     },
     Client {
-        #[clap(long, env = "crate_TOKEN")]
+        #[clap(long, env = "TELEPROBE_TOKEN")]
         token: String,
 
-        #[clap(long, env = "crate_HOST")]
+        #[clap(long, env = "TELEPROBE_HOST")]
         host: String,
 
         #[clap(subcommand)]
