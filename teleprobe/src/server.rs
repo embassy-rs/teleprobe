@@ -4,7 +4,7 @@ use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use bytes::Bytes;
 use log::{error, info};
 use parking_lot::Mutex;
@@ -24,7 +24,16 @@ use crate::{api, probe, run};
 const DEFAULT_LOG_FILTER: &str = "info,device=trace";
 
 fn run_firmware_on_device(elf: Bytes, probe: probe::Opts) -> anyhow::Result<()> {
-    let mut sess = probe::connect(probe)?;
+    // Retry 10 times.
+    let mut res = Err(anyhow!("bah"));
+    for _ in 0..10 {
+        res = probe::connect(&probe);
+        if res.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let mut sess = res?;
 
     let opts = run::Options {
         deadline: Some(Instant::now() + Duration::from_secs(10)),
