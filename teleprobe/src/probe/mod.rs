@@ -44,10 +44,10 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
-pub fn connect(opts: Opts) -> Result<Session> {
+pub fn connect(opts: &Opts) -> Result<Session> {
     let probes = Probe::list_all();
-    let probes = if let Some(selected_probe) = opts.probe {
-        probes_filter(&probes, &selected_probe)
+    let probes = if let Some(selected_probe) = &opts.probe {
+        probes_filter(&probes, selected_probe)
     } else {
         probes
     };

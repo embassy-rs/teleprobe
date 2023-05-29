@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::fs::FileType;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context};
 use futures::{stream, StreamExt};
+use log::{error, info};
 use object::{Object, ObjectSection};
 use reqwest::Client;
 use walkdir::WalkDir;
@@ -47,6 +47,10 @@ pub struct RunCommand {
     /// Recursively run all files under the given directories
     #[clap(short)]
     recursive: bool,
+
+    /// Show output logs for successes, not just failures.
+    #[clap(short)]
+    show_output: bool,
 }
 
 pub async fn main(cmd: Command) -> anyhow::Result<()> {
@@ -79,34 +83,46 @@ struct Job {
     elf: Vec<u8>,
 }
 
-async fn run_job(client: &Client, creds: &Credentials, job: Job) -> anyhow::Result<()> {
-    println!("Trying to run {} on {}", job.path.display(), job.target);
+async fn run_job(client: &Client, creds: &Credentials, job: Job, show_output: bool) -> bool {
     let res = client
         .post(format!("{}/targets/{}/run", creds.host, job.target))
         .body(job.elf)
         .bearer_auth(&creds.token)
         .send()
-        .await?;
+        .await;
 
-    if res.status().is_success() {
-        println!("Succesfully ran the elf on the target device.");
-        println!("Teleprobe response");
-        println!("==================");
-        println!("{}", res.text().await.unwrap_or_else(|_| "empty".to_string()));
-    } else {
-        println!("Error running the elf on the target device.status code");
-        println!(
-            "status code: {}: {}",
-            res.status().as_u16(),
-            res.status().canonical_reason().unwrap_or("unknown")
-        );
-        println!(
-            "response body: {}",
-            res.text().await.unwrap_or_else(|_| "empty".to_string())
-        );
-        bail!("Running failed!");
+    let mut logs = String::new();
+    let result = match res.context("HTTP request failed") {
+        Ok(res) => {
+            let status = res.status();
+            logs = res.text().await.unwrap_or_else(|_| "empty".to_string());
+            if status.is_success() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "HTTP request failed with status code: {}: {}",
+                    status.as_u16(),
+                    status.canonical_reason().unwrap_or("unknown")
+                ))
+            }
+        }
+        Err(e) => Err(e),
+    };
+
+    match result {
+        Ok(()) => {
+            info!("=== {} {}: OK", job.target, job.path.display());
+            if show_output {
+                info!("{}", logs);
+            }
+            true
+        }
+        Err(e) => {
+            error!("=== {} {}: FAILED: {}", job.target, job.path.display(), e);
+            error!("{}", logs);
+            false
+        }
     }
-    Ok(())
 }
 
 async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
@@ -127,6 +143,7 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
         cmd.files.iter().map(|f| f.into()).collect()
     };
 
+    let job_count = files.len();
     let mut jobs_by_target: HashMap<String, Vec<Job>> = HashMap::new();
 
     for path in files {
@@ -143,21 +160,36 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
             .push(Job { path, target, elf });
     }
 
+    info!("Running {} jobs across {} targets...", job_count, jobs_by_target.len());
+
     let client = reqwest::Client::new();
 
-    stream::iter(jobs_by_target)
+    let results: Vec<_> = stream::iter(jobs_by_target)
         .flat_map_unordered(None, |(_, jobs)| {
             let client = &client;
             stream::iter(jobs)
-                .map(move |job| run_job(client, creds, job))
+                .map(move |job| run_job(client, creds, job, cmd.show_output))
                 .buffer_unordered(2)
         })
-        .for_each(|b| async move {
-            println!("{:?}", b);
-        })
+        .collect()
         .await;
 
-    Ok(())
+    let mut succeeded = 0;
+    let mut failed = 0;
+    for r in results {
+        match r {
+            true => succeeded += 1,
+            false => failed += 1,
+        }
+    }
+
+    if failed != 0 {
+        log::error!("{} succeeded, {} failed :(", succeeded, failed);
+        bail!("test failed")
+    } else {
+        log::info!("all {} succeeded!", succeeded);
+        Ok(())
+    }
 }
 
 async fn list_targets(creds: &Credentials) -> anyhow::Result<()> {

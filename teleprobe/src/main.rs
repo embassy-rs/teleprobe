@@ -61,7 +61,7 @@ async fn async_main() -> anyhow::Result<()> {
             LocalCommand::ListProbes => crate::probe::list(),
             LocalCommand::Run { elf, probe } => {
                 let elf = std::fs::read(elf)?;
-                let mut sess = crate::probe::connect(probe)?;
+                let mut sess = crate::probe::connect(&probe)?;
 
                 let opts = crate::run::Options::default();
                 crate::run::run(&mut sess, &elf, opts)
