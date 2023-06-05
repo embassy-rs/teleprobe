@@ -327,40 +327,47 @@ impl Runner {
     }
 
     fn traceback(&mut self, core: &mut Core) -> anyhow::Result<()> {
+        let mut r = [0; 17];
+        for (i, val) in r.iter_mut().enumerate() {
+            *val = core.read_core_reg::<u32>(i as u16)?;
+        }
         info!(
             "  R0: {:08x}   R1: {:08x}   R2: {:08x}   R3: {:08x}",
-            core.read_core_reg::<u32>(0)?,
-            core.read_core_reg::<u32>(1)?,
-            core.read_core_reg::<u32>(2)?,
-            core.read_core_reg::<u32>(3)?,
+            r[0], r[1], r[2], r[3],
         );
         info!(
             "  R4: {:08x}   R5: {:08x}   R6: {:08x}   R7: {:08x}",
-            core.read_core_reg::<u32>(4)?,
-            core.read_core_reg::<u32>(5)?,
-            core.read_core_reg::<u32>(6)?,
-            core.read_core_reg::<u32>(7)?,
+            r[4], r[5], r[6], r[7],
         );
         info!(
             "  R8: {:08x}   R9: {:08x}  R10: {:08x}  R11: {:08x}",
-            core.read_core_reg::<u32>(8)?,
-            core.read_core_reg::<u32>(9)?,
-            core.read_core_reg::<u32>(10)?,
-            core.read_core_reg::<u32>(11)?,
+            r[8], r[9], r[10], r[11],
         );
         info!(
             " R12: {:08x}   SP: {:08x}   LR: {:08x}   PC: {:08x}",
-            core.read_core_reg::<u32>(12)?,
-            core.read_core_reg::<u32>(13)?,
-            core.read_core_reg::<u32>(14)?,
-            core.read_core_reg::<u32>(15)?,
+            r[12], r[13], r[14], r[15],
         );
-        info!("XPSR: {:08x}", core.read_core_reg::<u32>(XPSR)?);
+        info!("XPSR: {:08x}", r[16]);
 
-        let program_counter: u64 = core.read_core_reg(15)?;
+        info!("");
+        info!("Stack:");
+        let mut stack = [0u32; 32];
+        core.read_32(r[13] as _, &mut stack)?;
+        for i in 0..(stack.len() / 4) {
+            info!(
+                "{:08x}: {:08x} {:08x} {:08x} {:08x}",
+                r[13] + i as u32 * 16,
+                stack[i * 4 + 0],
+                stack[i * 4 + 1],
+                stack[i * 4 + 2],
+                stack[i * 4 + 3],
+            );
+        }
 
+        info!("");
+        info!("Backtrace:");
         let di = &self.di;
-        let stack_frames = di.unwind(core, program_counter).unwrap();
+        let stack_frames = di.unwind(core, r[15] as _).unwrap();
 
         for (i, frame) in stack_frames.iter().enumerate() {
             let mut s = String::new();
