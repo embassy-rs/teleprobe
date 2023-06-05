@@ -3,9 +3,10 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context};
 use futures::{stream, StreamExt};
-use log::{error, info};
+use log::{error, info, warn};
 use object::{Object, ObjectSection};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::api;
@@ -64,28 +65,58 @@ pub async fn main(cmd: Command) -> anyhow::Result<()> {
     }
 }
 
-fn detect_target(elf: &[u8]) -> anyhow::Result<String> {
-    let obj_file = object::File::parse(elf)?;
-    let Some(section) = obj_file.section_by_name(".teleprobe.target") else {
-        bail!(".teleprobe.target section not available")
-    };
-    let data = section.data()?;
-    if data.is_empty() {
-        bail!(".teleprobe.target section is empty")
-    }
+#[derive(Clone, Default, Debug)]
+struct ElfMetadata {
+    target: Option<String>,
+    timeout: Option<u64>,
+}
 
-    Ok(String::from_utf8(data.to_vec()).context(".teleprobe.target contents are not a valid utf8 string.")?)
+impl ElfMetadata {
+    fn from_elf(elf: &[u8]) -> anyhow::Result<Self> {
+        let mut meta: ElfMetadata = Default::default();
+
+        let obj_file = object::File::parse(elf)?;
+
+        if let Some(section) = obj_file.section_by_name(".teleprobe.target") {
+            let data = section.data()?;
+            if !data.is_empty() {
+                match String::from_utf8(data.to_vec()) {
+                    Ok(s) => meta.target = Some(s),
+                    Err(_) => warn!(".teleprobe.target contents are not a valid utf8 string."),
+                }
+            }
+        }
+
+        if let Some(section) = obj_file.section_by_name(".teleprobe.timeout") {
+            let data = section.data()?;
+            if data.len() == 4 {
+                meta.timeout = Some(u32::from_le_bytes(data.try_into().unwrap()) as u64)
+            } else {
+                warn!(".teleprobe.timeout contents are not a valid u32.")
+            }
+        }
+
+        Ok(meta)
+    }
 }
 
 struct Job {
     path: PathBuf,
     target: String,
     elf: Vec<u8>,
+    timeout: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RunArgs {
+    #[serde(default)]
+    timeout: Option<u64>,
 }
 
 async fn run_job(client: &Client, creds: &Credentials, job: Job, show_output: bool) -> bool {
     let res = client
         .post(format!("{}/targets/{}/run", creds.host, job.target))
+        .query(&RunArgs { timeout: job.timeout })
         .body(job.elf)
         .bearer_auth(&creds.token)
         .send()
@@ -148,16 +179,20 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
 
     for path in files {
         let elf: Vec<u8> = std::fs::read(&path)?;
+        let meta = ElfMetadata::from_elf(&elf)?;
 
-        let target = match cmd.target.clone() {
-            Some(t) => t,
-            None => detect_target(&elf)?,
-        };
+        let target = cmd
+            .target
+            .clone()
+            .or(meta.target)
+            .context("You have to either set --target, or embed it in the ELF using the `teleprobe-meta` crate.")?;
 
-        jobs_by_target
-            .entry(target.clone())
-            .or_default()
-            .push(Job { path, target, elf });
+        jobs_by_target.entry(target.clone()).or_default().push(Job {
+            path,
+            target,
+            elf,
+            timeout: meta.timeout,
+        });
     }
 
     info!("Running {} jobs across {} targets...", job_count, jobs_by_target.len());

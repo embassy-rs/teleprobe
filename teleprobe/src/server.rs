@@ -9,6 +9,7 @@ use bytes::Bytes;
 use log::{error, info};
 use parking_lot::Mutex;
 use probe_rs::Probe;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::spawn_blocking;
 use warp::hyper::StatusCode;
@@ -22,8 +23,10 @@ use crate::probe::probes_filter;
 use crate::{api, probe, run};
 
 const DEFAULT_LOG_FILTER: &str = "info,device=trace";
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn run_firmware_on_device(elf: Bytes, probe: probe::Opts) -> anyhow::Result<()> {
+fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> anyhow::Result<()> {
     // Retry 10 times.
     let mut res = Err(anyhow!("bah"));
     for _ in 0..10 {
@@ -36,7 +39,7 @@ fn run_firmware_on_device(elf: Bytes, probe: probe::Opts) -> anyhow::Result<()> 
     let mut sess = res?;
 
     let opts = run::Options {
-        deadline: Some(Instant::now() + Duration::from_secs(10)),
+        deadline: Some(Instant::now() + timeout),
         ..Default::default()
     };
     run::run(&mut sess, &elf, opts)?;
@@ -44,9 +47,9 @@ fn run_firmware_on_device(elf: Bytes, probe: probe::Opts) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn run_with_log_capture(elf: Bytes, probe: probe::Opts) -> (bool, Vec<u8>) {
+async fn run_with_log_capture(elf: Bytes, probe: probe::Opts, timeout: Duration) -> (bool, Vec<u8>) {
     let (ok, entries) = spawn_blocking(move || {
-        crate::logutil::with_capture(|| match run_firmware_on_device(elf, probe) {
+        crate::logutil::with_capture(|| match run_firmware_on_device(elf, probe, timeout) {
             Ok(()) => true,
             Err(e) => {
                 error!("Run failed: {:?}", e);
@@ -163,7 +166,13 @@ fn check_auth_filter(cx: Arc<Mutex<Context>>) -> impl Filter<Extract = (), Error
         .untuple_one()
 }
 
-async fn handle_run(name: String, elf: Bytes, cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
+#[derive(Deserialize, Serialize)]
+struct RunArgs {
+    #[serde(default)]
+    timeout: Option<u64>,
+}
+
+async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
     let target = {
         let context = cx.lock();
         match context.config.targets.iter().find(|t| t.name == name) {
@@ -188,7 +197,13 @@ async fn handle_run(name: String, elf: Bytes, cx: Arc<Mutex<Context>>) -> Result
         speed: target.speed,
     };
 
-    let (ok, logs) = run_with_log_capture(elf, probe).await;
+    let timeout = args
+        .timeout
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_TIMEOUT)
+        .min(MAX_TIMEOUT);
+
+    let (ok, logs) = run_with_log_capture(elf, probe, timeout).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
 
     Ok(with_status(logs, status))
@@ -288,6 +303,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     let target_run: _ = warp::path!("targets" / String / "run")
         .and(warp::post())
         .and(check_auth_filter(context.clone()))
+        .and(warp::query())
         .and(warp::body::bytes())
         .and(with_val(context.clone()))
         .and_then(handle_run);
