@@ -4,10 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::probe::ProbeSpecifier;
 
+fn default_default_timeout() -> u64 {
+    10
+}
+fn default_max_timeout() -> u64 {
+    60
+}
+
 #[derive(Clone, Deserialize)]
 pub struct Config {
     pub targets: Vec<Target>,
     pub auths: Vec<Auth>,
+    #[serde(default = "default_default_timeout")]
+    pub default_timeout: u64,
+    #[serde(default = "default_max_timeout")]
+    pub max_timeout: u64,
 }
 
 #[derive(Clone, Deserialize)]

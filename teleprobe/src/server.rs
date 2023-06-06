@@ -22,10 +22,6 @@ use crate::config::{Auth, Config, OidcAuthRule};
 use crate::probe::probes_filter;
 use crate::{api, probe, run};
 
-const DEFAULT_LOG_FILTER: &str = "info,device=trace";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_TIMEOUT: Duration = Duration::from_secs(60);
-
 fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> anyhow::Result<()> {
     // Retry 10 times.
     let mut res = Err(anyhow!("bah"));
@@ -197,11 +193,11 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         speed: target.speed,
     };
 
-    let timeout = args
+    let timeout_secs = args
         .timeout
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_TIMEOUT)
-        .min(MAX_TIMEOUT);
+        .unwrap_or(cx.lock().config.default_timeout)
+        .min(cx.lock().config.max_timeout);
+    let timeout = Duration::from_secs(timeout_secs);
 
     let (ok, logs) = run_with_log_capture(elf, probe, timeout).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
