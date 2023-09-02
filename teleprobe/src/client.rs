@@ -47,7 +47,7 @@ pub struct RunCommand {
     /// Cache file to avoid re-running binaries.
     /// If not specified, all binaries will be run.
     /// If specified, only the binaries that have changed will be run.
-    #[clap(long)]
+    #[clap(long, env = "TELEPROBE_CACHE")]
     cache: Option<String>,
 
     /// ELF files to flash+run
