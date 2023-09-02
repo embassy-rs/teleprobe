@@ -21,8 +21,8 @@ jobs:
         
       - name: Build
         run: |
-          cargo build
-          cargo build --release
-          cargo test
-          cargo test --release
+          cargo build teleprobe
+          cargo build teleprobe --release
+          cargo test teleprobe
+          cargo test teleprobe --release
     
