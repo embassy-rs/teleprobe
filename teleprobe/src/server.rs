@@ -193,11 +193,10 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         speed: target.speed,
     };
 
-    let timeout_secs = args
-        .timeout
-        .unwrap_or(cx.lock().config.default_timeout)
-        .min(cx.lock().config.max_timeout);
-    let timeout = Duration::from_secs(timeout_secs);
+    let timeout = {
+        let config = &mut cx.lock().config;
+        Duration::from_secs(args.timeout.unwrap_or(config.default_timeout).min(config.max_timeout))
+    };
 
     let (ok, logs) = run_with_log_capture(elf, probe, timeout).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
