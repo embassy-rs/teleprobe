@@ -24,8 +24,8 @@ jobs:
         
       - name: Build
         run: |
-          cargo build teleprobe
-          cargo build teleprobe --release
-          cargo test teleprobe
-          cargo test teleprobe --release
+          cargo build --manifest-path teleprobe/Cargo.toml
+          cargo build --manifest-path teleprobe/Cargo.toml --release
+          cargo test --manifest-path teleprobe/Cargo.toml
+          cargo test --manifest-path teleprobe/Cargo.toml --release
     
