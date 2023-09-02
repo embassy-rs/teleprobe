@@ -34,6 +34,8 @@ pin-project-lite = "0.2.9"
 backtrace = "0.3.67"
 futures = "0.3.28"
 walkdir = "2.3.3"
+orion = "0.17.5"
+hex = "0.4.3"
 
 [target.'cfg(not(windows))'.dependencies]
 openssl = { version = "0.10.52", optional = true }

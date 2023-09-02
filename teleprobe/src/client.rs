@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context};
 use futures::{stream, StreamExt};
 use log::{error, info, warn};
 use object::{Object, ObjectSection};
+use orion::hash::digest;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -42,6 +44,12 @@ pub struct RunCommand {
     #[clap(long)]
     target: Option<String>,
 
+    /// Cache file to avoid re-running binaries.
+    /// If not specified, all binaries will be run.
+    /// If specified, only the binaries that have changed will be run.
+    #[clap(long)]
+    cache: Option<String>,
+
     /// ELF files to flash+run
     files: Vec<String>,
 
@@ -63,6 +71,12 @@ pub async fn main(cmd: Command) -> anyhow::Result<()> {
         Subcommand::ListTargets => list_targets(&cmd.credentials).await,
         Subcommand::Run(scmd) => run(&cmd.credentials, scmd).await,
     }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Cache {
+    /// A map of file checksums that have passed the test.
+    files: HashMap<String, ()>,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -104,6 +118,7 @@ struct Job {
     path: PathBuf,
     target: String,
     elf: Vec<u8>,
+    hash: String,
     timeout: Option<u64>,
 }
 
@@ -113,7 +128,7 @@ struct RunArgs {
     timeout: Option<u64>,
 }
 
-async fn run_job(client: &Client, creds: &Credentials, job: Job, show_output: bool) -> bool {
+async fn run_job(client: &Client, creds: &Credentials, job: Job, show_output: bool) -> (bool, String) {
     let res = client
         .post(format!("{}/targets/{}/run", creds.host, job.target))
         .query(&RunArgs { timeout: job.timeout })
@@ -146,13 +161,30 @@ async fn run_job(client: &Client, creds: &Credentials, job: Job, show_output: bo
             if show_output {
                 info!("{}", logs);
             }
-            true
+            (true, job.hash.clone())
         }
         Err(e) => {
             error!("=== {} {}: FAILED: {}", job.target, job.path.display(), e);
             error!("{}", logs);
-            false
+            (false, String::new())
         }
+    }
+}
+
+fn load_cache(cache: Option<String>) -> Cache {
+    let cache = match cache {
+        Some(cache) => cache,
+        _ => return Cache::default(),
+    };
+
+    let cache_file = match File::open(cache) {
+        Ok(cache_file) => cache_file,
+        _ => return Cache::default(),
+    };
+
+    match serde_json::from_reader(&cache_file) {
+        Ok(cache) => cache,
+        _ => return Cache::default(),
     }
 }
 
@@ -174,11 +206,15 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
         cmd.files.iter().map(|f| f.into()).collect()
     };
 
+    let before_cache = load_cache(cmd.cache.clone());
+    let mut after_cache = Cache::default();
     let job_count = files.len();
     let mut jobs_by_target: HashMap<String, Vec<Job>> = HashMap::new();
+    let mut skipped_jobs: Vec<_> = Vec::new();
 
     for path in files {
         let elf: Vec<u8> = std::fs::read(&path)?;
+        let hash = hex::encode(&digest(elf.as_slice()).unwrap());
         let meta = ElfMetadata::from_elf(&elf)?;
 
         let target = cmd
@@ -187,15 +223,27 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
             .or(meta.target)
             .context("You have to either set --target, or embed it in the ELF using the `teleprobe-meta` crate.")?;
 
+        if before_cache.files.contains_key(&hash) {
+            skipped_jobs.push((target, path.clone()));
+            after_cache.files.insert(hash, ());
+
+            continue;
+        }
+
         jobs_by_target.entry(target.clone()).or_default().push(Job {
             path,
             target,
             elf,
+            hash,
             timeout: meta.timeout,
         });
     }
 
     info!("Running {} jobs across {} targets...", job_count, jobs_by_target.len());
+
+    for (target, path) in skipped_jobs {
+        info!("=== {} {}: SKIPPED", target, path.display());
+    }
 
     let client = reqwest::Client::new();
 
@@ -211,12 +259,30 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
 
     let mut succeeded = 0;
     let mut failed = 0;
-    for r in results {
+    for (r, hash) in results {
         match r {
-            true => succeeded += 1,
+            true => {
+                after_cache.files.insert(hash, ());
+
+                succeeded += 1
+            }
             false => failed += 1,
         }
     }
+
+    cmd.cache.map(|cache| {
+        let cache_file = match File::create(&cache) {
+            Ok(cache_file) => cache_file,
+            _ => return,
+        };
+
+        match serde_json::to_writer(cache_file, &after_cache) {
+            Ok(_) => println!("saved cache to {}", &cache),
+            Err(_) => println!("failed to saved cache to {}", &cache),
+        };
+
+        // I assume the file is closed when it's dropped here
+    });
 
     if failed != 0 {
         log::error!("{} succeeded, {} failed :(", succeeded, failed);
