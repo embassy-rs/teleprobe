@@ -210,6 +210,7 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
     let mut after_cache = Cache::default();
     let job_count = files.len();
     let mut jobs_by_target: HashMap<String, Vec<Job>> = HashMap::new();
+    let mut skipped_jobs: Vec<_> = Vec::new();
 
     for path in files {
         let elf: Vec<u8> = std::fs::read(&path)?;
@@ -223,7 +224,7 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
             .context("You have to either set --target, or embed it in the ELF using the `teleprobe-meta` crate.")?;
 
         if before_cache.files.contains_key(&hash) {
-            info!("=== {} {}: SKIPPED", target, path.display());
+            skipped_jobs.push((target, path.clone()));
             after_cache.files.insert(hash, ());
 
             continue;
@@ -239,6 +240,10 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
     }
 
     info!("Running {} jobs across {} targets...", job_count, jobs_by_target.len());
+
+    for (target, path) in skipped_jobs {
+        info!("=== {} {}: SKIPPED", target, path.display());
+    }
 
     let client = reqwest::Client::new();
 
