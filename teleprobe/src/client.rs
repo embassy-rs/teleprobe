@@ -213,7 +213,7 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
 
     for path in files {
         let elf: Vec<u8> = std::fs::read(&path)?;
-        let hash = serde_json::to_string(&digest(elf.as_slice()).unwrap()).unwrap();
+        let hash = hex::encode(&digest(elf.as_slice()).unwrap());
         let meta = ElfMetadata::from_elf(&elf)?;
 
         let target = cmd
