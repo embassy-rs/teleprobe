@@ -65,6 +65,9 @@ pub struct Target {
     pub connect_under_reset: bool,
     #[serde(default)]
     pub speed: Option<u32>,
+    #[cfg(feature = "power_reset")]
+    #[serde(default)]
+    pub power_reset: bool
 }
 
 #[derive(Clone, Serialize, Deserialize)]

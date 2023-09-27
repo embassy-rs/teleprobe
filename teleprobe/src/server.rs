@@ -191,6 +191,8 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         connect_under_reset: target.connect_under_reset,
         probe: Some(target.probe.clone()),
         speed: target.speed,
+        #[cfg(feature = "power_reset")]
+        power_reset: target.power_reset,
     };
 
     let timeout = {
@@ -218,6 +220,8 @@ fn targets(cx: Arc<Mutex<Context>>) -> api::TargetList {
             connect_under_reset: target.connect_under_reset,
             speed: target.speed,
             up: is_up,
+            #[cfg(feature = "power_reset")]
+            power_reset: target.power_reset,
         });
     }
 
