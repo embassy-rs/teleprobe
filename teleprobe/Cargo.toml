@@ -14,7 +14,7 @@ defmt-decoder = { version = "0.3.7", features = ["unstable"] }
 jsonwebtoken = "8.3.0"
 log = "0.4.18"
 object = "0.30.3"
-probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "a73fa49e782a0e9a3c4e0e58d5fd71ad3869a1a2" }
+probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "88191def0caf85d548e9d2a7c5354aeffcaf37de" }
 #probe-rs = { path = "./probe-rs/probe-rs" }
 reqwest = { version = "0.11.18", default-features = false, features = [
     "json",
