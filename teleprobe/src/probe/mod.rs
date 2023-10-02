@@ -60,7 +60,9 @@ pub fn connect(opts: &Opts) -> Result<Session> {
                 bail!("power reset requires a serial number");
             }
             log::debug!("probe power reset");
-            power_reset(&probes[0].serial_number.as_ref().unwrap())?;
+            if let Err(err) = power_reset(&probes[0].serial_number.as_ref().unwrap()){
+                log::warn!("power reset failed for: {}", err);
+            }
         }
         probes = get_probe(&opts)?;
     }
@@ -179,7 +181,7 @@ fn power_reset(probe_serial: &str) -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 Ok(())
             } else {
-                bail!("uhubctl failed: {}", String::from_utf8_lossy(&output.stderr))
+                bail!("uhubctl failed for serial \'{}\': {}", probe_serial,  String::from_utf8_lossy(&output.stderr))
             }
         }
         Err(e) => bail!("uhubctl failed: {}", e)
