@@ -2,6 +2,7 @@ mod specifier;
 
 use std::process::Command;
 use std::sync::Mutex;
+
 use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
@@ -28,7 +29,6 @@ pub struct Opts {
     pub connect_under_reset: bool,
 
     // If the target should be tried to be power cycled via USB
-    #[cfg(feature = "power_reset")]
     #[clap(long)]
     pub power_reset: bool,
 }
@@ -56,20 +56,16 @@ pub fn list() -> Result<()> {
 pub fn connect(opts: &Opts) -> Result<Session> {
     let mut probes = get_probe(&opts)?;
 
-    #[cfg(feature = "power_reset")]
-    {
-        if opts.power_reset {
-            if probes[0].serial_number.is_none(){
-                bail!("power reset requires a serial number");
-            }
-            log::debug!("probe power reset");
-            if let Err(err) = power_reset(&probes[0].serial_number.as_ref().unwrap()){
-                log::warn!("power reset failed for: {}", err);
-            }
+    if opts.power_reset {
+        if probes[0].serial_number.is_none() {
+            bail!("power reset requires a serial number");
+        }
+        log::debug!("probe power reset");
+        if let Err(err) = power_reset(&probes[0].serial_number.as_ref().unwrap()) {
+            log::warn!("power reset failed for: {}", err);
         }
         probes = get_probe(&opts)?;
     }
-
 
     // GIANT HACK to reset both cores in rp2040.
     // Ideally this would be a custom sequence in probe-rs:
@@ -169,7 +165,6 @@ pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Ve
         .collect()
 }
 
-#[cfg(feature = "power_reset")]
 fn power_reset(probe_serial: &str) -> Result<()> {
     let _guard = UHUBCTL_MUTEX.lock();
     let output = Command::new("uhubctl")
@@ -186,9 +181,13 @@ fn power_reset(probe_serial: &str) -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 Ok(())
             } else {
-                bail!("uhubctl failed for serial \'{}\': {}", probe_serial,  String::from_utf8_lossy(&output.stderr))
+                bail!(
+                    "uhubctl failed for serial \'{}\': {}",
+                    probe_serial,
+                    String::from_utf8_lossy(&output.stderr)
+                )
             }
         }
-        Err(e) => bail!("uhubctl failed: {}", e)
+        Err(e) => bail!("uhubctl failed: {}", e),
     }
 }
