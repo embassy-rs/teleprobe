@@ -1,5 +1,6 @@
 mod specifier;
 
+use std::process::Command;
 use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
@@ -22,6 +23,11 @@ pub struct Opts {
     /// Connect to device when NRST is pressed.
     #[clap(long)]
     pub connect_under_reset: bool,
+
+    // If the target should be tried to be power cycled via USB
+    #[cfg(feature = "power_reset")]
+    #[clap(long)]
+    pub power_reset: bool,
 }
 
 pub fn list() -> Result<()> {
@@ -45,22 +51,20 @@ pub fn list() -> Result<()> {
 }
 
 pub fn connect(opts: &Opts) -> Result<Session> {
-    let probes = Probe::list_all();
-    let probes = if let Some(selected_probe) = &opts.probe {
-        probes_filter(&probes, selected_probe)
-    } else {
-        probes
-    };
+    let mut probes = get_probe(&opts)?;
 
-    // ensure exactly one probe is found and open it
-    if probes.is_empty() {
-        bail!("no probe was found")
+    #[cfg(feature = "power_reset")]
+    {
+        if opts.power_reset {
+            if probes[0].serial_number.is_none(){
+                bail!("power reset requires a serial number");
+            }
+            log::debug!("probe power reset");
+            power_reset(&probes[0].serial_number.as_ref().unwrap())?;
+        }
+        probes = get_probe(&opts)?;
     }
-    log::debug!("found {} probes", probes.len());
-    if probes.len() > 1 {
-        //let _ = print_probes(probes);
-        bail!("more than one probe found; use --probe to specify which one to use");
-    }
+
 
     // GIANT HACK to reset both cores in rp2040.
     // Ideally this would be a custom sequence in probe-rs:
@@ -118,6 +122,26 @@ pub fn connect(opts: &Opts) -> Result<Session> {
     Ok(sess)
 }
 
+fn get_probe(opts: &&Opts) -> Result<Vec<DebugProbeInfo>> {
+    let probes = Probe::list_all();
+    let probes = if let Some(selected_probe) = &opts.probe {
+        probes_filter(&probes, selected_probe)
+    } else {
+        probes
+    };
+
+    // ensure exactly one probe is found and open it
+    if probes.is_empty() {
+        bail!("no probe was found")
+    }
+    log::debug!("found {} probes", probes.len());
+    if probes.len() > 1 {
+        //let _ = print_probes(probes);
+        bail!("more than one probe found; use --probe to specify which one to use");
+    }
+    Ok(probes)
+}
+
 pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Vec<DebugProbeInfo> {
     probes
         .iter()
@@ -138,4 +162,26 @@ pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Ve
         })
         .cloned()
         .collect()
+}
+
+#[cfg(feature = "power_reset")]
+fn power_reset(probe_serial: &str) -> Result<()> {
+    let output = Command::new("uhubctl")
+        .arg("-a")
+        .arg("cycle")
+        .arg("-s")
+        .arg(probe_serial)
+        .output();
+
+    match output {
+        Ok(output) => {
+            if output.status.success() {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                Ok(())
+            } else {
+                bail!("uhubctl failed: {}", String::from_utf8_lossy(&output.stderr))
+            }
+        }
+        Err(e) => bail!("uhubctl failed: {}", e)
+    }
 }

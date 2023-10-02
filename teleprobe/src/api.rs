@@ -10,6 +10,8 @@ pub struct Target {
     pub connect_under_reset: bool,
     pub speed: Option<u32>,
     pub up: bool,
+    #[cfg(feature = "power_reset")]
+    pub power_reset: bool
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
