@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     logutil::init();
 
     // force capture backtraces
-    std::env::set_var("RUST_BACKTRACE", "1");
+    //std::env::set_var("RUST_BACKTRACE", "1");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
