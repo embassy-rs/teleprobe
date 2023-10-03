@@ -1,10 +1,13 @@
 mod specifier;
 
 use std::process::Command;
+use std::sync::Mutex;
 use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
 pub use specifier::ProbeSpecifier;
+
+static UHUBCTL_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Parser)]
 pub struct Opts {
@@ -60,7 +63,9 @@ pub fn connect(opts: &Opts) -> Result<Session> {
                 bail!("power reset requires a serial number");
             }
             log::debug!("probe power reset");
-            power_reset(&probes[0].serial_number.as_ref().unwrap())?;
+            if let Err(err) = power_reset(&probes[0].serial_number.as_ref().unwrap()){
+                log::warn!("power reset failed for: {}", err);
+            }
         }
         probes = get_probe(&opts)?;
     }
@@ -166,12 +171,14 @@ pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Ve
 
 #[cfg(feature = "power_reset")]
 fn power_reset(probe_serial: &str) -> Result<()> {
+    let _guard = UHUBCTL_MUTEX.lock();
     let output = Command::new("uhubctl")
         .arg("-a")
         .arg("cycle")
         .arg("-s")
         .arg(probe_serial)
         .output();
+    drop(_guard);
 
     match output {
         Ok(output) => {
@@ -179,7 +186,7 @@ fn power_reset(probe_serial: &str) -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 Ok(())
             } else {
-                bail!("uhubctl failed: {}", String::from_utf8_lossy(&output.stderr))
+                bail!("uhubctl failed for serial \'{}\': {}", probe_serial,  String::from_utf8_lossy(&output.stderr))
             }
         }
         Err(e) => bail!("uhubctl failed: {}", e)
