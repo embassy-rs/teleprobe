@@ -1,10 +1,13 @@
 mod specifier;
 
 use std::process::Command;
+use std::sync::Mutex;
 use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
 pub use specifier::ProbeSpecifier;
+
+static UHUBCTL_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Parser)]
 pub struct Opts {
@@ -168,12 +171,14 @@ pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Ve
 
 #[cfg(feature = "power_reset")]
 fn power_reset(probe_serial: &str) -> Result<()> {
+    let _guard = UHUBCTL_MUTEX.lock();
     let output = Command::new("uhubctl")
         .arg("-a")
         .arg("cycle")
         .arg("-s")
         .arg(probe_serial)
         .output();
+    drop(_guard);
 
     match output {
         Ok(output) => {
