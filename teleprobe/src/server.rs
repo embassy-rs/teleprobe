@@ -192,6 +192,8 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         probe: Some(target.probe.clone()),
         speed: target.speed,
         power_reset: target.power_reset,
+        cycle_delay_seconds: target.cycle_delay_seconds,
+        max_settle_time_millis: target.max_settle_time_millis,
     };
 
     let timeout = {
@@ -220,6 +222,8 @@ fn targets(cx: Arc<Mutex<Context>>) -> api::TargetList {
             speed: target.speed,
             up: is_up,
             power_reset: target.power_reset,
+            cycle_delay_seconds: target.cycle_delay_seconds,
+            max_settle_time_millis: target.max_settle_time_millis,
         });
     }
 

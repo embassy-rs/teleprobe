@@ -1,14 +1,17 @@
 mod specifier;
 
+use std::fmt;
 use std::process::Command;
 use std::sync::Mutex;
-
+use std::time::Instant;
 use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
 pub use specifier::ProbeSpecifier;
 
 static UHUBCTL_MUTEX: Mutex<()> = Mutex::new(());
+
+const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[derive(Clone, Parser)]
 pub struct Opts {
@@ -31,6 +34,12 @@ pub struct Opts {
     // If the target should be tried to be power cycled via USB
     #[clap(long)]
     pub power_reset: bool,
+
+    #[clap(long, default_value = "1")]
+    pub cycle_delay_seconds: f64,
+
+    #[clap(long, default_value = "2000")]
+    pub max_settle_time_millis: u64,
 }
 
 pub fn list() -> Result<()> {
@@ -56,15 +65,31 @@ pub fn list() -> Result<()> {
 pub fn connect(opts: &Opts) -> Result<Session> {
     let mut probes = get_probe(&opts)?;
 
-    if opts.power_reset {
-        if probes[0].serial_number.is_none() {
-            bail!("power reset requires a serial number");
+    {
+        if opts.power_reset {
+            if probes[0].serial_number.is_none() {
+                bail!("power reset requires a serial number");
+            }
+            log::debug!("probe power reset");
+            if let Err(err) = power_reset(&probes[0].serial_number.as_ref().unwrap(), 0.5) {
+                log::warn!("power reset failed for: {}", err);
+            }
+
+
+            let end = Instant::now() + std::time::Duration::from_millis(opts.max_settle_time_millis);
+            probes = vec![];
+            while Instant::now() < end && probes.is_empty() {
+                std::thread::sleep(SETTLE_REPROBE_INTERVAL);
+                probes = match get_probe(&opts) {
+                    Ok(p) => {p}
+                    Err(_) => {probes}
+                }
+            }
+            if probes.is_empty() {
+                bail!("Probe not reappeared after power reset")
+            }
+
         }
-        log::debug!("probe power reset");
-        if let Err(err) = power_reset(&probes[0].serial_number.as_ref().unwrap()) {
-            log::warn!("power reset failed for: {}", err);
-        }
-        probes = get_probe(&opts)?;
     }
 
     // GIANT HACK to reset both cores in rp2040.
@@ -165,11 +190,13 @@ pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Ve
         .collect()
 }
 
-fn power_reset(probe_serial: &str) -> Result<()> {
+fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
     let _guard = UHUBCTL_MUTEX.lock();
     let output = Command::new("uhubctl")
         .arg("-a")
         .arg("cycle")
+        .arg("-d")
+        .arg(format!("{:.2}", cycle_delay_seconds))
         .arg("-s")
         .arg(probe_serial)
         .output();
@@ -178,14 +205,12 @@ fn power_reset(probe_serial: &str) -> Result<()> {
     match output {
         Ok(output) => {
             if output.status.success() {
-                std::thread::sleep(std::time::Duration::from_millis(1000));
                 Ok(())
             } else {
-                bail!(
-                    "uhubctl failed for serial \'{}\': {}",
+                bail!("uhubctl failed for serial \'{}\' with delay {}:  {}",
+                    cycle_delay_seconds,
                     probe_serial,
-                    String::from_utf8_lossy(&output.stderr)
-                )
+                    String::from_utf8_lossy(&output.stderr))
             }
         }
         Err(e) => bail!("uhubctl failed: {}", e),
