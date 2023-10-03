@@ -67,6 +67,18 @@ pub struct Target {
     pub speed: Option<u32>,
     #[serde(default)]
     pub power_reset: bool,
+    #[serde(default = "default_cycle_delay_seconds")]
+    pub cycle_delay_seconds: f64,
+    #[serde(default = "default_max_settle_time_millis")]
+    pub max_settle_time_millis: u64,
+}
+
+fn default_cycle_delay_seconds() -> f64 {
+    1.0
+}
+
+fn default_max_settle_time_millis() -> u64 {
+    2000
 }
 
 #[derive(Clone, Serialize, Deserialize)]
