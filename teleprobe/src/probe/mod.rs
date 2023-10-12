@@ -1,9 +1,9 @@
 mod specifier;
 
-use std::fmt;
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Instant;
+
 use anyhow::{bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
@@ -75,20 +75,18 @@ pub fn connect(opts: &Opts) -> Result<Session> {
                 log::warn!("power reset failed for: {}", err);
             }
 
-
             let end = Instant::now() + std::time::Duration::from_millis(opts.max_settle_time_millis);
             probes = vec![];
             while Instant::now() < end && probes.is_empty() {
                 std::thread::sleep(SETTLE_REPROBE_INTERVAL);
                 probes = match get_probe(&opts) {
-                    Ok(p) => {p}
-                    Err(_) => {probes}
+                    Ok(p) => p,
+                    Err(_) => probes,
                 }
             }
             if probes.is_empty() {
                 bail!("Probe not reappeared after power reset")
             }
-
         }
     }
 
@@ -207,10 +205,12 @@ fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
             if output.status.success() {
                 Ok(())
             } else {
-                bail!("uhubctl failed for serial \'{}\' with delay {}:  {}",
+                bail!(
+                    "uhubctl failed for serial \'{}\' with delay {}:  {}",
                     cycle_delay_seconds,
                     probe_serial,
-                    String::from_utf8_lossy(&output.stderr))
+                    String::from_utf8_lossy(&output.stderr)
+                )
             }
         }
         Err(e) => bail!("uhubctl failed: {}", e),
