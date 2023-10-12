@@ -3,19 +3,17 @@ use core::pin::Pin;
 use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe, UnwindSafe};
-use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
-use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use log::{LevelFilter, Log, Record};
-use once_cell::sync::OnceCell;
 use pin_project_lite::pin_project;
 use pretty_env_logger::env_logger::filter::{self, Filter};
 use pretty_env_logger::env_logger::Logger;
 use serde::{Deserialize, Serialize};
 
-static LOGGER: OnceCell<CaptureLogger> = OnceCell::new();
+static LOGGER: OnceLock<CaptureLogger> = OnceLock::new();
 
 pub(crate) fn init() {
     let mut inner_logger = pretty_env_logger::formatted_builder();
