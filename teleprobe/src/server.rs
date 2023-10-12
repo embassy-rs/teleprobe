@@ -142,7 +142,7 @@ async fn check_auth(auth_header: String, cx: Arc<Mutex<Context>>) -> Result<(), 
                 break;
             }
             Err(e) => {
-                info!("Auth method {} #{} failed: {:?}", auth.to_string(), i, e)
+                info!("Auth method {} #{} failed: {}", auth.to_string(), i, e)
             }
         }
     }
