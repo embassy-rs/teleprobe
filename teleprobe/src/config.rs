@@ -74,7 +74,7 @@ pub struct Target {
 }
 
 fn default_cycle_delay_seconds() -> f64 {
-    1.0
+    0.5
 }
 
 fn default_max_settle_time_millis() -> u64 {
