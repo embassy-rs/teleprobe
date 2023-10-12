@@ -6,38 +6,39 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.71"
-base64 = "0.21.2"
-bytes = "1.4.0"
-clap = { version = "4.3.0", features = ["derive", "env"] }
-defmt-decoder = { version = "0.3.7", features = ["unstable"] }
+anyhow = "1.0.75"
+base64 = "0.21.4"
+bytes = "1.5.0"
+clap = { version = "4.4.6", features = ["derive", "env"] }
+defmt-decoder = { version = "0.3.9", features = ["unstable"] }
 jsonwebtoken = "8.3.0"
-log = "0.4.18"
-object = "0.30.3"
-probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "88191def0caf85d548e9d2a7c5354aeffcaf37de" }
-#probe-rs = { path = "./probe-rs/probe-rs" }
-reqwest = { version = "0.11.18", default-features = false, features = [
+log = "0.4.20"
+object = "0.32.1"
+probe-rs = "0.21"
+#probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "88191def0caf85d548e9d2a7c5354aeffcaf37de" }
+#probe-rs = { path = "../../../probe-rs/probe-rs" }
+reqwest = { version = "0.11.22", default-features = false, features = [
     "json",
     "native-tls",
 ] }
-serde = "1.0.163"
-serde_json = "1.0.96"
-serde_yaml = "0.9.21"
+serde = "1.0.188"
+serde_json = "1.0.107"
+serde_yaml = "0.9.25"
 tokio = { version = "1", default-features = false, features = [] }
-url = "2.3.1"
+url = "2.4.1"
 warp = { version = "0.3", default-features = false }
 parking_lot = "0.12"
-pretty_env_logger = "0.4.0"
-chrono = { version = "0.4.25", features = ["serde"] }
-pin-project-lite = "0.2.9"
-backtrace = "0.3.67"
+pretty_env_logger = "0.5.0"
+chrono = { version = "0.4.31", features = ["serde"] }
+pin-project-lite = "0.2.13"
+backtrace = "0.3.69"
 futures = "0.3.28"
-walkdir = "2.3.3"
-orion = "0.17.5"
+walkdir = "2.4.0"
+orion = "0.17.6"
 hex = "0.4.3"
 
 [target.'cfg(not(windows))'.dependencies]
-openssl = { version = "0.10.52", optional = true }
+openssl = { version = "0.10.57", optional = true }
 
 [build-dependencies]
 git-version = "0.3.5"
