@@ -9,6 +9,7 @@ use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use log::{info, warn};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
+use probe_rs::config::MemoryRegion;
 use probe_rs::debug::DebugInfo;
 use probe_rs::flashing::DownloadOptions;
 use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
@@ -127,8 +128,29 @@ impl Runner {
             }
         }
 
-        let run_from_ram = vector_table.location >= 0x2000_0000;
-        //let run_from_ram = true;
+        let mut run_from_ram = None;
+        for r in &sess.target().memory_map {
+            match r {
+                MemoryRegion::Ram(r) => {
+                    if r.range.contains(&(vector_table.location as u64)) {
+                        run_from_ram = Some(true);
+                    }
+                }
+                MemoryRegion::Generic(r) => {
+                    if r.range.contains(&(vector_table.location as u64)) {
+                        run_from_ram = Some(true);
+                    }
+                }
+                MemoryRegion::Nvm(r) => {
+                    if r.range.contains(&(vector_table.location as u64)) {
+                        run_from_ram = Some(false);
+                    }
+                }
+            }
+        }
+
+        let run_from_ram = run_from_ram.unwrap();
+        info!("run_from_ram: {:?}", run_from_ram);
 
         if !opts.do_flash {
             log::info!("skipped flashing");
