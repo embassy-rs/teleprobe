@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::PathBuf;
 
@@ -6,7 +6,7 @@ use anyhow::{bail, Context};
 use futures::{stream, StreamExt};
 use log::{error, info, warn};
 use object::{Object, ObjectSection};
-use orion::hash::digest;
+use orion::hazardous::hash::blake2::blake2b::Blake2b;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -76,18 +76,19 @@ pub async fn main(cmd: Command) -> anyhow::Result<()> {
 #[derive(Serialize, Deserialize, Default)]
 struct Cache {
     /// A map of file checksums that have passed the test.
-    files: HashMap<String, ()>,
+    files: HashSet<String>,
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 struct ElfMetadata {
     target: Option<String>,
     timeout: Option<u64>,
 }
 
 impl ElfMetadata {
-    fn from_elf(elf: &[u8]) -> anyhow::Result<Self> {
-        let mut meta: ElfMetadata = Default::default();
+    fn from_elf(elf: &[u8]) -> anyhow::Result<(Self, Blake2b)> {
+        let mut target = None;
+        let mut timeout = None;
 
         let obj_file = object::File::parse(elf)?;
 
@@ -95,7 +96,7 @@ impl ElfMetadata {
             let data = section.data()?;
             if !data.is_empty() {
                 match String::from_utf8(data.to_vec()) {
-                    Ok(s) => meta.target = Some(s),
+                    Ok(s) => target = Some(s),
                     Err(_) => warn!(".teleprobe.target contents are not a valid utf8 string."),
                 }
             }
@@ -104,13 +105,36 @@ impl ElfMetadata {
         if let Some(section) = obj_file.section_by_name(".teleprobe.timeout") {
             let data = section.data()?;
             if data.len() == 4 {
-                meta.timeout = Some(u32::from_le_bytes(data.try_into().unwrap()) as u64)
+                timeout = Some(u32::from_le_bytes(data.try_into().unwrap()) as u64)
             } else {
                 warn!(".teleprobe.timeout contents are not a valid u32.")
             }
         }
 
-        Ok(meta)
+        let mut hasher = Blake2b::new(32)?;
+        for section in &mut obj_file.sections() {
+            let section_name = match section.name() {
+                Ok(name) => name,
+                _ => continue,
+            };
+
+            if section_name == "" || section_name.starts_with(".debug_") {
+                continue;
+            }
+
+            let section_data = match section.data() {
+                Ok(data) => data,
+                _ => continue,
+            };
+
+            let section_address = section.address();
+
+            hasher.update(section_name.as_bytes())?;
+            hasher.update(section_data)?;
+            hasher.update(&section_address.to_le_bytes())?;
+        }
+
+        Ok((Self { target, timeout }, hasher))
     }
 }
 
@@ -214,8 +238,7 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
 
     for path in files {
         let elf: Vec<u8> = std::fs::read(&path)?;
-        let hash = hex::encode(&digest(elf.as_slice()).unwrap());
-        let meta = ElfMetadata::from_elf(&elf)?;
+        let (meta, mut hasher) = ElfMetadata::from_elf(&elf)?;
 
         let target = cmd
             .target
@@ -223,9 +246,15 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
             .or(meta.target)
             .context("You have to either set --target, or embed it in the ELF using the `teleprobe-meta` crate.")?;
 
-        if before_cache.files.contains_key(&hash) {
+        hasher.update(target.as_bytes())?;
+        hasher.update(&meta.timeout.unwrap_or_default().to_le_bytes())?;
+
+        let digest = hasher.finalize()?;
+        let hash = hex::encode(&digest);
+
+        if before_cache.files.contains(&hash) {
             skipped_jobs.push((target, path.clone()));
-            after_cache.files.insert(hash, ());
+            after_cache.files.insert(hash);
 
             continue;
         }
@@ -241,7 +270,7 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
 
     info!("Running {} jobs across {} targets...", job_count, jobs_by_target.len());
 
-    for (target, path) in skipped_jobs {
+    for (target, path) in &skipped_jobs {
         info!("=== {} {}: SKIPPED", target, path.display());
     }
 
@@ -257,12 +286,12 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
         .collect()
         .await;
 
-    let mut succeeded = 0;
-    let mut failed = 0;
+    let mut succeeded = skipped_jobs.len();
+    let mut failed = 0usize;
     for (r, hash) in results {
         match r {
             true => {
-                after_cache.files.insert(hash, ());
+                after_cache.files.insert(hash);
 
                 succeeded += 1
             }
