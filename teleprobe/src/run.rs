@@ -8,10 +8,10 @@ use anyhow::{anyhow, bail};
 use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use log::{info, warn};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
-use object::ObjectSymbol;
+use object::{Architecture, ObjectSymbol};
 use probe_rs::config::MemoryRegion;
 use probe_rs::debug::DebugInfo;
-use probe_rs::flashing::DownloadOptions;
+use probe_rs::flashing::{DownloadOptions, IdfOptions};
 use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 
@@ -48,7 +48,7 @@ struct Runner {
 
     rtt_addr: u32,
     main_addr: u32,
-    vector_table: VectorTable,
+    vector_table: Option<VectorTable>,
 
     defmt: UpChannel,
     defmt_table: Box<Table>,
@@ -65,6 +65,7 @@ unsafe fn fuck_it<'a, 'b, T>(wtf: &'a T) -> &'b T {
 impl Runner {
     fn new(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Result<Self> {
         let elf = ElfFile::parse(elf_bytes)?;
+        let arch = elf.architecture();
 
         let di = DebugInfo::from_raw(elf_bytes)?;
 
@@ -77,7 +78,7 @@ impl Runner {
         //    bail!("(BUG) location info is incomplete; it will be omitted from the output");
         //}
 
-        // sections used in cortex-m-rt
+        // sections used in cortex-m-rt/(esp-)riscv-rt
         // NOTE we won't load `.uninit` so it is not included here
         // NOTE we don't load `.bss` because the app (cortex-m-rt) will zero it
         let candidates = [".vector_table", ".text", ".rodata", ".data"];
@@ -117,8 +118,11 @@ impl Runner {
             }
         }
 
-        let vector_table = vector_table.ok_or_else(|| anyhow!("`.vector_table` section is missing"))?;
-        log::debug!("vector table: {:x?}", vector_table);
+        if let Some(vector_table) = &vector_table {
+            log::debug!("vector table: {:x?}", vector_table);
+        } else if arch == Architecture::Arm {
+            return Err(anyhow!("`.vector_table` section is missing"));
+        }
 
         // reset ALL cores other than the main one.
         // This is needed for rp2040 core1.
@@ -128,28 +132,29 @@ impl Runner {
             }
         }
 
-        let mut run_from_ram = None;
-        for r in &sess.target().memory_map {
-            match r {
-                MemoryRegion::Ram(r) => {
-                    if r.range.contains(&(vector_table.location as u64)) {
-                        run_from_ram = Some(true);
+        let mut run_from_ram = false;
+        if let Some(vector_table) = &vector_table {
+            for r in &sess.target().memory_map {
+                match r {
+                    MemoryRegion::Ram(r) => {
+                        if r.range.contains(&(vector_table.location as u64)) {
+                            run_from_ram = true;
+                        }
                     }
-                }
-                MemoryRegion::Generic(r) => {
-                    if r.range.contains(&(vector_table.location as u64)) {
-                        run_from_ram = Some(true);
+                    MemoryRegion::Generic(r) => {
+                        if r.range.contains(&(vector_table.location as u64)) {
+                            run_from_ram = true;
+                        }
                     }
-                }
-                MemoryRegion::Nvm(r) => {
-                    if r.range.contains(&(vector_table.location as u64)) {
-                        run_from_ram = Some(false);
+                    MemoryRegion::Nvm(r) => {
+                        if r.range.contains(&(vector_table.location as u64)) {
+                            run_from_ram = false;
+                        }
                     }
                 }
             }
         }
 
-        let run_from_ram = run_from_ram.unwrap();
         info!("run_from_ram: {:?}", run_from_ram);
 
         if !opts.do_flash {
@@ -162,11 +167,23 @@ impl Runner {
             dopts.keep_unwritten_bytes = true;
             dopts.verify = true;
 
-            let mut loader = sess.target().flash_loader();
-            loader.load_elf_data(&mut Cursor::new(&elf_bytes))?;
+            let target = sess.target();
+            let mut loader = target.flash_loader();
+            let mut file = Cursor::new(&elf_bytes);
+
+            // TODO: Include Xtensa when supported by `probe-rs`
+            if arch == Architecture::Riscv32 && target.name.starts_with("esp") {
+                // FIXME: Flash verification currently fails for ESP devices; at reset,
+                // flash is not mapped to any address space, so the debugger is unable
+                // to read it. See:
+                //   https://github.com/probe-rs/probe-rs/issues/1866
+                dopts.verify = false;
+                loader.load_idf_data(sess, &mut file, IdfOptions::default())?;
+            } else {
+                loader.load_elf_data(&mut file)?;
+            }
             loader.commit(sess, dopts)?;
 
-            //flashing::download_file_with_options(sess, &opts.elf, Format::Elf, dopts)?;
             log::info!("flashing done!");
         }
 
@@ -177,13 +194,15 @@ impl Runner {
             let mut core = sess.core(0)?;
 
             if run_from_ram {
-                // On STM32H7 due to RAM ECC (I think?) it's possible that the
-                // last written word doesn't "stick" on reset because it's "half written"
-                // https://www.st.com/resource/en/application_note/dm00623136-error-correction-code-ecc-management-for-internal-memories-protection-on-stm32h7-series-stmicroelectronics.pdf
-                //
-                // Do one dummy write to ensure the last word sticks.
-                let data = core.read_word_32(vector_table.location as _)?;
-                core.write_word_32(vector_table.location as _, data)?;
+                if let Some(vector_table) = &vector_table {
+                    // On STM32H7 due to RAM ECC (I think?) it's possible that the
+                    // last written word doesn't "stick" on reset because it's "half written"
+                    // https://www.st.com/resource/en/application_note/dm00623136-error-correction-code-ecc-management-for-internal-memories-protection-on-stm32h7-series-stmicroelectronics.pdf
+                    //
+                    // Do one dummy write to ensure the last word sticks.
+                    let data = core.read_word_32(vector_table.location as _)?;
+                    core.write_word_32(vector_table.location as _, data)?;
+                }
             }
 
             core.reset_and_halt(TIMEOUT)?;
@@ -194,16 +213,18 @@ impl Runner {
             }
 
             if run_from_ram {
-                core.write_core_reg(PC, vector_table.reset)?;
-                core.write_core_reg(SP, vector_table.initial_sp)?;
+                if let Some(vector_table) = &vector_table {
+                    core.write_core_reg(PC, vector_table.reset)?;
+                    core.write_core_reg(SP, vector_table.initial_sp)?;
 
-                // Write VTOR
-                // NOTE this DOES NOT play nice with the softdevice.
-                core.write_word_32(0xE000ED08, vector_table.location)?;
+                    // Write VTOR
+                    // NOTE this DOES NOT play nice with the softdevice.
+                    core.write_word_32(0xE000ED08, vector_table.location)?;
 
-                // Hacks to get the softdevice to think we're doing a cold boot here.
-                //core.write_32(0x2000_005c, &[0]).unwrap();
-                //core.write_32(0x2000_0000, &[0x1000, vector_table.location]).unwrap();
+                    // Hacks to get the softdevice to think we're doing a cold boot here.
+                    //core.write_32(0x2000_005c, &[0]).unwrap();
+                    //core.write_32(0x2000_0000, &[0x1000, vector_table.location]).unwrap();
+                }
             }
 
             if !run_from_ram {
@@ -224,10 +245,12 @@ impl Runner {
             const FLAG: u32 = 2; // BLOCK_IF_FULL
             core.write_word_32((rtt_addr + OFFSET) as _, FLAG)?;
 
-            if run_from_ram {
-                core.write_8((vector_table.hard_fault & !THUMB_BIT) as _, &[0x00, 0xbe])?;
-            } else {
-                core.set_hw_breakpoint((vector_table.hard_fault & !THUMB_BIT) as _)?;
+            if let Some(vector_table) = &vector_table {
+                if run_from_ram {
+                    core.write_8((vector_table.hard_fault & !THUMB_BIT) as _, &[0x00, 0xbe])?;
+                } else {
+                    core.set_hw_breakpoint((vector_table.hard_fault & !THUMB_BIT) as _)?;
+                }
             }
 
             core.run()?;
