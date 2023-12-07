@@ -26,6 +26,7 @@ teleprobe server
 ```
 
 The server listens on port `8080` by default, this can be changed via the `--port XX` option.
+Logging verbosity can be adjusted via `RUST_LOG` environment variable.
 
 #### Configuration
 Server configuration is stored in a file called `config.yaml`. It contains both configuration of authentication (bearer tokens or OIDC) and definition of targets.
