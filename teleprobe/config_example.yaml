@@ -1,12 +1,12 @@
 auths:
-  - oidc:
+  - !oidc
       issuer: https://token.actions.githubusercontent.com
       rules:
         - claims:
             iss: https://token.actions.githubusercontent.com
             aud: https://github.com/embassy-rs
             repository: embassy-rs/embassy
-  - token:
+  - !token
       token: hN6e2msKlqsW9smsjyF5I7xmiuPQij0O
 targets:
   - name: nucleo-stm32f429zi
