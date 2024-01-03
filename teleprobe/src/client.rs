@@ -60,6 +60,10 @@ pub struct RunCommand {
     /// Show output logs for successes, not just failures.
     #[clap(short)]
     show_output: bool,
+
+    /// Override job timeout
+    #[clap(short)]
+    timeout: Option<u64>,
 }
 
 pub async fn main(cmd: Command) -> anyhow::Result<()> {
@@ -259,12 +263,18 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
             continue;
         }
 
+        // Override timeout if requested
+        let timeout = match cmd.timeout {
+            Some(_) => cmd.timeout,
+            None => meta.timeout,
+        };
+
         jobs_by_target.entry(target.clone()).or_default().push(Job {
             path,
             target,
             elf,
             hash,
-            timeout: meta.timeout,
+            timeout,
         });
     }
 
