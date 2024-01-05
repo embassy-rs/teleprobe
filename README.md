@@ -6,7 +6,7 @@ Run MCU binaries on remote targets.
 Teleprobe has three operation modes - local, server and client.
 
 ### Local Mode
-Local mode is intended to be run on the machine where the remote MCU is connected, usually for debugging purposes.
+Local mode is intended to be run on the machine where the MCU is connected, usually for debugging purposes.
 
 List available probes:
 ```
@@ -63,6 +63,41 @@ teleprobe client --host 'http://SERVER_ADDRESS:8080' --token ACCESS_TOKEN run --
 ```
 
 The `ACCESS_TOKEN` and host can be also stored into `TELEPROBE_TOKEN` and `TELEPROBE_HOST` environment variables.
+
+## Preparing MCU binaries
+
+### Automatic target discovery
+
+Using teleprobe-meta crate, it's possible to embed various metadata into target binary,
+including target name and timeout. This allows running binaries just by calling `run <ELF>`
+without additional flags.
+
+### Running from RAM
+
+Before uploading binary to target, teleprobe analyzes it to see whether it's possible
+to run it from RAM instead of uploading it to MCU's internal flash and running from there.
+
+In order to achieve that, target binary needs to be linked with a modified linker script
+which puts data into RAM instead of FLASH.
+
+* Cortex-M: [`link_ram_cortex_m.x`](link_ram_cortex_m.x)
+
+Then include the renamed `link_ram.x` linker script  via `build.rs`:
+
+```rust
+fn main() -> Result<(), Box<dyn Error>> {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    fs::write(out.join("link_ram.x"), include_bytes!("link_ram.x")).unwrap();
+    println!("cargo:rustc-link-search={}", out.display());
+
+    println!("cargo:rerun-if-changed=link_ram.x");
+    println!("cargo:rustc-link-arg-bins=-Tlink_ram.x");
+
+    // ...
+
+    Ok(())
+}
+```
 
 ## License
 
