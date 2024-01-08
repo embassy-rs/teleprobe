@@ -39,6 +39,7 @@ pub struct Opts {
 pub fn list() -> Result<()> {
     let lister = Lister::new();
     let probes = lister.list_all();
+
     if probes.is_empty() {
         println!("No probe found!");
         return Ok(());
@@ -62,7 +63,7 @@ pub fn connect(opts: &Opts) -> Result<Session> {
         let Some(selector) = &opts.probe else {
             bail!("power reset requires a serial number");
         };
-        let Some(serial_number) = &selector.serial_number else {
+        if selector.serial_number.is_none() {
             bail!("power reset requires a serial number");
         };
 

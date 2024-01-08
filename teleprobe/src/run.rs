@@ -82,7 +82,6 @@ impl Runner {
         // NOTE we don't load `.bss` because the app (cortex-m-rt) will zero it
         let candidates = [".vector_table", ".text", ".rodata", ".data"];
 
-        let mut sections = vec![];
         let mut vector_table = None;
         for sect in elf.sections() {
             if let Ok(name) = sect.name() {
@@ -111,8 +110,6 @@ impl Runner {
                             hard_fault: data[3],
                         });
                     }
-
-                    sections.push(Section { start, data });
                 }
             }
         }
@@ -575,13 +572,6 @@ fn get_rtt_main_from(elf: &ElfFile) -> anyhow::Result<(Option<u32>, u32)> {
     }
 
     Ok((rtt, main.ok_or_else(|| anyhow!("`main` symbol not found"))?))
-}
-
-/// ELF section to be loaded onto the target
-#[derive(Debug)]
-struct Section {
-    start: u32,
-    data: Vec<u32>,
 }
 
 /// The contents of the vector table

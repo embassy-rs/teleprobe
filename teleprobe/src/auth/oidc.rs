@@ -3,20 +3,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-mod base64 {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        let base64 = base64::encode(v);
-        String::serialize(&base64, s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        let base64 = String::deserialize(d)?;
-        base64::decode(base64.as_bytes()).map_err(serde::de::Error::custom)
-    }
-}
-
+#[allow(dead_code)]
 #[derive(Clone, Deserialize)]
 struct OpenIDConfiguration {
     issuer: String,
@@ -33,6 +20,7 @@ struct JsonWebKeySet {
 }
 
 #[derive(Clone, Deserialize)]
+#[allow(dead_code)]
 struct JsonWebKey {
     kty: String,
     kid: String,

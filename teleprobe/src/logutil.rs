@@ -162,17 +162,6 @@ mod log_panics {
         }
     }
 
-    /// Determines how backtraces will be displayed.
-    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-    pub enum BacktraceMode {
-        /// Backtraces will be omitted from the log.
-        Off,
-        /// Backtraces will include addresses, but no symbol names or locations.
-        Unresolved,
-        /// Backtraces will include addresses as well as symbol names and locations when possible.
-        Resolved,
-    }
-
     /// Configures the panic hook, ending with initialization.
     ///
     /// ## Example
@@ -197,18 +186,6 @@ mod log_panics {
             Self {
                 make_backtrace: Backtrace::default,
             }
-        }
-
-        /// Controls how backtraces are displayed.
-        ///
-        /// The default when backtraces are enabled is [`BacktraceMode::Resolved`].
-        pub fn backtrace_mode(mut self, mode: BacktraceMode) -> Self {
-            self.make_backtrace = match mode {
-                BacktraceMode::Off => || Backtrace::from(vec![]),
-                BacktraceMode::Unresolved => Backtrace::new_unresolved,
-                BacktraceMode::Resolved => Backtrace::default,
-            };
-            self
         }
 
         /// Initializes the panic hook.
