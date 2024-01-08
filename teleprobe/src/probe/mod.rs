@@ -1,13 +1,9 @@
-mod specifier;
-
 use std::process::Command;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
-pub use specifier::ProbeSpecifier;
+use probe_rs::{DebugProbeSelector, Lister, MemoryInterface, Permissions, Probe, Session};
 
 const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -15,7 +11,7 @@ const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_m
 pub struct Opts {
     /// The probe to use (specified by eg. `VID:PID`, `VID:PID:Serial`, or just `Serial`).
     #[clap(long, env = "PROBE_RUN_PROBE")]
-    pub probe: Option<ProbeSpecifier>,
+    pub probe: Option<DebugProbeSelector>,
 
     /// The probe clock frequency in kHz
     #[clap(long)]
@@ -41,7 +37,8 @@ pub struct Opts {
 }
 
 pub fn list() -> Result<()> {
-    let probes = Probe::list_all();
+    let lister = Lister::new();
+    let probes = lister.list_all();
     if probes.is_empty() {
         println!("No probe found!");
         return Ok(());
@@ -61,38 +58,38 @@ pub fn list() -> Result<()> {
 }
 
 pub fn connect(opts: &Opts) -> Result<Session> {
-    let mut probes = get_probe(&opts)?;
+    let mut probe = if opts.power_reset {
+        let Some(selector) = &opts.probe else {
+            bail!("power reset requires a serial number");
+        };
+        let Some(serial_number) = &selector.serial_number else {
+            bail!("power reset requires a serial number");
+        };
 
-    {
-        if opts.power_reset {
-            if probes[0].serial_number.is_none() {
-                bail!("power reset requires a serial number");
-            }
-            log::debug!("probe power reset");
-            if let Err(err) = power_reset(&probes[0].serial_number.as_ref().unwrap(), 0.5) {
-                log::warn!("power reset failed for: {}", err);
-            }
+        log::debug!("probe power reset");
+        if let Err(err) = power_reset(&selector.serial_number.as_ref().unwrap(), 0.5) {
+            log::warn!("power reset failed for: {}", err);
+        }
 
-            let end = Instant::now() + std::time::Duration::from_millis(opts.max_settle_time_millis);
-            probes = vec![];
-            while Instant::now() < end && probes.is_empty() {
-                std::thread::sleep(SETTLE_REPROBE_INTERVAL);
-                probes = match get_probe(&opts) {
-                    Ok(p) => p,
-                    Err(_) => probes,
-                }
+        let end = Instant::now() + std::time::Duration::from_millis(opts.max_settle_time_millis);
+        loop {
+            if Instant::now() > end {
+                bail!("Probe did not appear after power reset")
             }
-            if probes.is_empty() {
-                bail!("Probe not reappeared after power reset")
+            std::thread::sleep(SETTLE_REPROBE_INTERVAL);
+            match open_probe(opts) {
+                Ok(probe) => break probe,
+                Err(e) => log::debug!("failed to open probe, will retry: {:?}", e),
             }
         }
-    }
+    } else {
+        open_probe(opts)?
+    };
 
     // GIANT HACK to reset both cores in rp2040.
     // Ideally this would be a custom sequence in probe-rs:
     // https://github.com/probe-rs/probe-rs/pull/1603
     if opts.chip.to_ascii_uppercase().starts_with("RP2040") {
-        let mut probe = probes[0].open()?;
         log::debug!("opened probe for rp2040 reset");
 
         if let Some(speed) = opts.speed {
@@ -121,9 +118,13 @@ pub fn connect(opts: &Opts) -> Result<Session> {
         core.write_word_32(WATCHDOG_CTRL, WATCHDOG_CTRL_ENABLE)?;
         core.write_word_32(WATCHDOG_CTRL, WATCHDOG_CTRL_ENABLE | WATCHDOG_CTRL_TRIGGER)?;
         log::debug!("rp2040: reset done, reattaching");
+
+        // reopen probe.
+        drop(core);
+        drop(sess);
+        probe = open_probe(opts)?;
     }
 
-    let mut probe = probes[0].open()?;
     log::debug!("opened probe");
 
     if let Some(speed) = opts.speed {
@@ -144,46 +145,23 @@ pub fn connect(opts: &Opts) -> Result<Session> {
     Ok(sess)
 }
 
-fn get_probe(opts: &&Opts) -> Result<Vec<DebugProbeInfo>> {
-    let probes = Probe::list_all();
-    let probes = if let Some(selected_probe) = &opts.probe {
-        probes_filter(&probes, selected_probe)
-    } else {
-        probes
-    };
+fn open_probe(opts: &Opts) -> Result<Probe> {
+    let lister = Lister::new();
 
-    // ensure exactly one probe is found and open it
-    if probes.is_empty() {
-        bail!("no probe was found")
-    }
-    log::debug!("found {} probes", probes.len());
-    if probes.len() > 1 {
-        //let _ = print_probes(probes);
-        bail!("more than one probe found; use --probe to specify which one to use");
-    }
-    Ok(probes)
-}
-
-pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Vec<DebugProbeInfo> {
-    probes
-        .iter()
-        .filter(|&p| {
-            if let Some((vid, pid)) = selector.vid_pid {
-                if p.vendor_id != vid || p.product_id != pid {
-                    return false;
-                }
+    match &opts.probe {
+        None => {
+            let probes = lister.list_all();
+            if probes.is_empty() {
+                bail!("no probe was found")
+            }
+            if probes.len() > 1 {
+                bail!("more than one probe found; use --probe to specify which one to use");
             }
 
-            if let Some(serial) = &selector.serial {
-                if p.serial_number.as_deref() != Some(serial) {
-                    return false;
-                }
-            }
-
-            true
-        })
-        .cloned()
-        .collect()
+            Ok(probes[0].open(&lister)?)
+        }
+        Some(selector) => Ok(lister.open(selector)?),
+    }
 }
 
 fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {

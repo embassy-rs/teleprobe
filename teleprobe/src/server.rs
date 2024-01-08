@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail};
 use bytes::Bytes;
 use log::{error, info};
 use parking_lot::Mutex;
-use probe_rs::Probe;
+use probe_rs::Lister;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::spawn_blocking;
@@ -19,7 +19,6 @@ use warp::{Filter, Rejection, Reply};
 use crate::auth::oidc;
 use crate::auth::oidc::Client;
 use crate::config::{Auth, Config, OidcAuthRule};
-use crate::probe::probes_filter;
 use crate::{api, probe, run};
 
 fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> anyhow::Result<()> {
@@ -210,10 +209,19 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
 fn targets(cx: Arc<Mutex<Context>>) -> api::TargetList {
     let targets = cx.lock().config.targets.clone();
     let mut res = Vec::new();
-    let up_probes = Probe::list_all();
+    let up_probes = Lister::new().list_all();
 
     for target in targets {
-        let is_up = !probes_filter(&up_probes, &target.probe).is_empty();
+        let is_up = up_probes.iter().any(|probe| {
+            probe.vendor_id == target.probe.vendor_id
+                && probe.product_id == target.probe.product_id
+                && target
+                    .probe
+                    .serial_number
+                    .as_ref()
+                    .map(|s| Some(s) == probe.serial_number.as_ref())
+                    .unwrap_or(true)
+        });
         res.push(api::Target {
             name: target.name,
             chip: target.chip,

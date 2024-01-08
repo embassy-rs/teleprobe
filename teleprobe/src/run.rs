@@ -10,7 +10,7 @@ use log::{info, warn};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
 use probe_rs::config::MemoryRegion;
-use probe_rs::debug::DebugInfo;
+use probe_rs::debug::{DebugInfo, DebugRegisters};
 use probe_rs::flashing::DownloadOptions;
 use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
@@ -389,7 +389,12 @@ impl Runner {
         info!("");
         info!("Backtrace:");
         let di = &self.di;
-        let stack_frames = di.unwind(core, r[15] as _).unwrap();
+        let initial_registers = DebugRegisters::from_core(core);
+        let exception_handler = probe_rs::exception_handler_for_core(core.core_type());
+        let instruction_set = core.instruction_set().ok();
+        let stack_frames = di
+            .unwind(core, initial_registers, exception_handler.as_ref(), instruction_set)
+            .unwrap();
 
         for (i, frame) in stack_frames.iter().enumerate() {
             let mut s = String::new();
@@ -404,7 +409,7 @@ impl Runner {
                     write!(&mut s, "\n       ").unwrap();
 
                     if let Some(dir) = &location.directory {
-                        write!(&mut s, "{}", dir.display()).unwrap();
+                        write!(&mut s, "{:?}", dir).unwrap();
                     }
 
                     if let Some(file) = &location.file {

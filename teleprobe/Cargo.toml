@@ -14,9 +14,7 @@ defmt-decoder = { version = "0.3.9", features = ["unstable"] }
 jsonwebtoken = "8.3.0"
 log = "0.4.20"
 object = "0.32.1"
-probe-rs = "0.21"
-#probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "88191def0caf85d548e9d2a7c5354aeffcaf37de" }
-#probe-rs = { path = "../../../probe-rs/probe-rs" }
+probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "252e51cd6f5d7e7b2b7feb134c544644b10d2679" }
 reqwest = { version = "0.11.22", default-features = false, features = [
     "json",
     "native-tls",
@@ -42,3 +40,6 @@ openssl = { version = "0.10.57", optional = true }
 
 [build-dependencies]
 git-version = "0.3.5"
+
+[profile.release]
+debug = 2
