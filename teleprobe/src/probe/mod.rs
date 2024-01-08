@@ -9,8 +9,6 @@ use clap::Parser;
 use probe_rs::{DebugProbeInfo, MemoryInterface, Permissions, Probe, Session};
 pub use specifier::ProbeSpecifier;
 
-static UHUBCTL_MUTEX: Mutex<()> = Mutex::new(());
-
 const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[derive(Clone, Parser)]
@@ -189,7 +187,6 @@ pub fn probes_filter(probes: &[DebugProbeInfo], selector: &ProbeSpecifier) -> Ve
 }
 
 fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
-    let _guard = UHUBCTL_MUTEX.lock();
     let output = Command::new("uhubctl")
         .arg("-a")
         .arg("cycle")
@@ -198,7 +195,6 @@ fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
         .arg("-s")
         .arg(probe_serial)
         .output();
-    drop(_guard);
 
     match output {
         Ok(output) => {
@@ -207,8 +203,8 @@ fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
             } else {
                 bail!(
                     "uhubctl failed for serial \'{}\' with delay {}:  {}",
-                    cycle_delay_seconds,
                     probe_serial,
+                    cycle_delay_seconds,
                     String::from_utf8_lossy(&output.stderr)
                 )
             }
