@@ -59,7 +59,7 @@ pub fn list() -> Result<()> {
 }
 
 pub fn connect(opts: &Opts) -> Result<Session> {
-    let mut probe = if opts.power_reset {
+    if opts.power_reset {
         let Some(selector) = &opts.probe else {
             bail!("power reset requires a serial number");
         };
@@ -71,20 +71,18 @@ pub fn connect(opts: &Opts) -> Result<Session> {
         if let Err(err) = power_reset(&selector.serial_number.as_ref().unwrap(), 0.5) {
             log::warn!("power reset failed for: {}", err);
         }
+    }
 
-        let end = Instant::now() + std::time::Duration::from_millis(opts.max_settle_time_millis);
-        loop {
-            if Instant::now() > end {
-                bail!("Probe did not appear after power reset")
-            }
-            std::thread::sleep(SETTLE_REPROBE_INTERVAL);
-            match open_probe(opts) {
-                Ok(probe) => break probe,
-                Err(e) => log::debug!("failed to open probe, will retry: {:?}", e),
-            }
+    let end: Instant = Instant::now() + std::time::Duration::from_millis(opts.max_settle_time_millis);
+    let mut probe = loop {
+        if Instant::now() > end {
+            bail!("Probe did not appear after the max settle time.")
         }
-    } else {
-        open_probe(opts)?
+        std::thread::sleep(SETTLE_REPROBE_INTERVAL);
+        match open_probe(opts) {
+            Ok(probe) => break probe,
+            Err(e) => log::debug!("failed to open probe, will retry: {:?}", e),
+        }
     };
 
     // GIANT HACK to reset both cores in rp2040.
