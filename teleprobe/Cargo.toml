@@ -34,6 +34,8 @@ futures = "0.3.30"
 walkdir = "2.4.0"
 orion = "0.17.6"
 hex = "0.4.3"
+nusb = "0.1.4"
+libc = "0.2.152"
 
 [target.'cfg(not(windows))'.dependencies]
 openssl = { version = "0.10.63", optional = true }

@@ -24,7 +24,7 @@ pub(crate) fn init() {
     if let Ok(s) = ::std::env::var("RUST_LOG") {
         ui_filter.parse(&s);
     } else {
-        ui_filter.filter_level(LevelFilter::Error);
+        ui_filter.filter_level(LevelFilter::Warn);
         ui_filter.filter_module("teleprobe", LevelFilter::Info);
         ui_filter.filter_module("device", LevelFilter::Trace);
     }

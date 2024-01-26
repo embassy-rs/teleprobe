@@ -1,11 +1,10 @@
-use std::process::Command;
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use probe_rs::{DebugProbeSelector, Lister, MemoryInterface, Permissions, Probe, Session};
 
-const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Clone, Parser)]
 pub struct Opts {
@@ -163,29 +162,75 @@ fn open_probe(opts: &Opts) -> Result<Probe> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
-    let output = Command::new("uhubctl")
-        .arg("-a")
-        .arg("cycle")
-        .arg("-d")
-        .arg(format!("{:.2}", cycle_delay_seconds))
-        .arg("-s")
-        .arg(probe_serial)
-        .output();
+    anyhow::bail!("USB power reset is only supported on linux")
+}
 
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                Ok(())
-            } else {
-                bail!(
-                    "uhubctl failed for serial \'{}\' with delay {}:  {}",
-                    probe_serial,
-                    cycle_delay_seconds,
-                    String::from_utf8_lossy(&output.stderr)
-                )
-            }
-        }
-        Err(e) => bail!("uhubctl failed: {}", e),
+#[cfg(target_os = "linux")]
+fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
+    use std::ffi::CString;
+    use std::fs::File;
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    let dev = nusb::list_devices()?
+        .find(|d| {
+            let serial = d.serial_number().unwrap_or_default();
+
+            serial == probe_serial || to_hex(serial) == probe_serial
+        })
+        .ok_or_else(|| anyhow!("device with serial {} not found", probe_serial))?;
+
+    let port_path = dev.sysfs_path().join("port");
+    let port_path = CString::new(port_path.as_os_str().as_bytes()).unwrap();
+
+    // The USB device goes away when we disable power to it.
+    // If we open the port dir we can keep a "handle" to it even if the device goes away, so
+    // we can write `disable=0` with openat() to reenable it.
+    let port_fd = unsafe { libc::open(port_path.as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if port_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
     }
+
+    // close port_fd on function exit
+    struct CloseFd(i32);
+    impl Drop for CloseFd {
+        fn drop(&mut self) {
+            unsafe { libc::close(self.0) };
+        }
+    }
+    let _port_fd_close = CloseFd(port_fd);
+
+    let disable_path = CString::new("disable").unwrap();
+
+    // disable port power
+    let disable_fd = unsafe { libc::openat(port_fd, disable_path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC) };
+    if disable_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    unsafe { File::from_raw_fd(disable_fd) }.write_all(b"1")?;
+
+    // sleep
+    sleep(Duration::from_secs_f64(cycle_delay_seconds));
+
+    // enable port power
+    let disable_fd = unsafe { libc::openat(port_fd, disable_path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC) };
+    if disable_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    unsafe { File::from_raw_fd(disable_fd) }.write_all(b"0")?;
+
+    Ok(())
+}
+
+fn to_hex(s: &str) -> String {
+    use std::fmt::Write;
+    s.as_bytes().iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02X}"); // Writing a String never fails
+        s
+    })
 }
