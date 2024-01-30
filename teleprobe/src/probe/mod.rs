@@ -67,7 +67,7 @@ pub fn connect(opts: &Opts) -> Result<Session> {
         };
 
         log::debug!("probe power reset");
-        if let Err(err) = power_reset(&selector.serial_number.as_ref().unwrap(), 0.5) {
+        if let Err(err) = power_reset(&selector.serial_number.as_ref().unwrap(), 1.0) {
             log::warn!("power reset failed for: {}", err);
         }
     }
