@@ -404,7 +404,7 @@ impl Runner {
                     write!(&mut s, "\n       ").unwrap();
 
                     if let Some(dir) = &location.directory {
-                        write!(&mut s, "{:?}", dir).unwrap();
+                        write!(&mut s, "{}", dir.to_string_lossy()).unwrap();
                     }
 
                     if let Some(file) = &location.file {
