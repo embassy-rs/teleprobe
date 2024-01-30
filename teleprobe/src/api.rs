@@ -1,4 +1,4 @@
-use probe_rs::DebugProbeSelector;
+use probe_rs::probe::DebugProbeSelector;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

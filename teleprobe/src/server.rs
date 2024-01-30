@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail};
 use bytes::Bytes;
 use log::{error, info};
 use parking_lot::Mutex;
-use probe_rs::Lister;
+use probe_rs::probe::list::Lister;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::spawn_blocking;

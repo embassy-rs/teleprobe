@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
-use probe_rs::{DebugProbeSelector, Lister, MemoryInterface, Permissions, Probe, Session};
+use probe_rs::probe::list::Lister;
+use probe_rs::probe::{DebugProbeSelector, Probe};
+use probe_rs::{MemoryInterface, Permissions, Session};
 
 const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 

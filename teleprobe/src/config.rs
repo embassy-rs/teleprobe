@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use probe_rs::DebugProbeSelector;
+use probe_rs::probe::DebugProbeSelector;
 use serde::{Deserialize, Serialize};
 
 fn default_default_timeout() -> u64 {

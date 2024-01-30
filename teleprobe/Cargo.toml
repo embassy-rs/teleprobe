@@ -14,7 +14,7 @@ defmt-decoder = { version = "0.3.9", features = ["unstable"] }
 jsonwebtoken = "9.2.0"
 log = "0.4.20"
 object = "0.32.2"
-probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "cb89b521e1442bc05f128f3da0569e2670c77964" }
+probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "150d53d0520b6308d24652c35d21cf217aa48348" }
 reqwest = { version = "0.11.23", default-features = false, features = [
     "json",
     "native-tls",
