@@ -389,9 +389,7 @@ impl Runner {
         let initial_registers = DebugRegisters::from_core(core);
         let exception_handler = probe_rs::exception_handler_for_core(core.core_type());
         let instruction_set = core.instruction_set().ok();
-        let stack_frames = di
-            .unwind(core, initial_registers, exception_handler.as_ref(), instruction_set)
-            .unwrap();
+        let stack_frames = di.unwind(core, initial_registers, exception_handler.as_ref(), instruction_set)?;
 
         for (i, frame) in stack_frames.iter().enumerate() {
             let mut s = String::new();
