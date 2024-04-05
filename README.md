@@ -2,6 +2,10 @@
 
 Run MCU binaries on remote targets.
 
+## ⚠️ maintenance status ⚠️
+
+This project is actively maintained only for the goal of running [Embassy](https://github.com/embassy-rs/embassy) hardware-in-the-loop tests in CI. I don't have bandwidth to maintain it for other use cases. If you need help or want to contribute big features feel free to ask, but a positive response (or a response at all) is not guaranteed.
+
 ## Operation Modes
 Teleprobe has three operation modes - local, server and client.
 
