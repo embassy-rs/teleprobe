@@ -197,6 +197,13 @@ impl Runner {
                 // Write VTOR
                 // NOTE this DOES NOT play nice with the softdevice.
                 core.write_word_32(0xE000ED08, vector_table.location)?;
+                let got_vtor = core.read_word_32(0xE000ED08)?;
+                if got_vtor != vector_table.location {
+                    panic!(
+                        "failed to set VTOR! got {:08x} want {:08x}",
+                        got_vtor, vector_table.location
+                    )
+                }
 
                 // Hacks to get the softdevice to think we're doing a cold boot here.
                 //core.write_32(0x2000_005c, &[0]).unwrap();
