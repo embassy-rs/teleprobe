@@ -46,12 +46,13 @@ pub fn list() -> Result<()> {
         return Ok(());
     }
     for probe in probes {
+        let probe_type = probe.probe_type();
         println!(
-            "{:04x}:{:04x}:{} -- {:?} {}",
+            "{:04x}:{:04x}:{} -- {} {}",
             probe.vendor_id,
             probe.product_id,
             probe.serial_number.unwrap_or_else(|| "SN unspecified".to_string()),
-            probe.probe_type,
+            probe_type,
             probe.identifier,
         );
     }
@@ -158,7 +159,7 @@ fn open_probe(opts: &Opts) -> Result<Probe> {
                 bail!("more than one probe found; use --probe to specify which one to use");
             }
 
-            Ok(probes[0].open(&lister)?)
+            Ok(probes[0].open()?)
         }
         Some(selector) => Ok(lister.open(selector)?),
     }
