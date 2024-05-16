@@ -77,7 +77,7 @@ fn default_cycle_delay_seconds() -> f64 {
 }
 
 fn default_max_settle_time_millis() -> u64 {
-    20000
+    60000
 }
 
 #[derive(Clone, Serialize, Deserialize)]
