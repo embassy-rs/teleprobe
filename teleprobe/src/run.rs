@@ -23,6 +23,8 @@ pub const XPSR: RegisterId = RegisterId(16);
 const THUMB_BIT: u32 = 1;
 const TIMEOUT: Duration = Duration::from_secs(1);
 
+const POLL_SLEEP_MILLIS: u64 = 100;
+
 pub struct Options {
     pub do_flash: bool,
     pub deadline: Option<Instant>,
@@ -258,8 +260,14 @@ impl Runner {
         let current_dir = std::env::current_dir()?;
 
         let mut read_buf = [0; 1024];
-        let n = self.defmt.read(&mut sess.core(0).unwrap(), &mut read_buf)?;
-        self.defmt_stream.received(&read_buf[..n]);
+        match self.defmt.read(&mut sess.core(0).unwrap(), &mut read_buf)? {
+            0 => {
+                // Sleep to reduce CPU usage when defmt didn't return any data.
+                std::thread::sleep(Duration::from_millis(POLL_SLEEP_MILLIS));
+                return Ok(());
+            },
+            n => self.defmt_stream.received(&read_buf[..n]),
+        }
 
         loop {
             match self.defmt_stream.decode() {
