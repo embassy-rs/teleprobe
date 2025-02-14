@@ -7,15 +7,18 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.79"
-base64 = "0.21.7"
+base64 = "0.22.1"
 bytes = "1.5.0"
 clap = { version = "4.4.18", features = ["derive", "env"] }
-defmt-decoder = { version = "0.3.9", features = ["unstable"] }
+defmt-decoder = { version = "0.4.0", features = ["unstable"] }
 jsonwebtoken = "9.2.0"
 log = "0.4.20"
-object = "0.32.2"
-probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "386f8cab84928b1e317c075ff12211ae0c4eb5e2" }
-reqwest = { version = "0.11.23", default-features = false, features = [
+object = "0.36.7"
+#probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "386f8cab84928b1e317c075ff12211ae0c4eb5e2" }
+#probe-rs = { path = "../../../probe-rs/probe-rs" }
+probe-rs = { version = "0.27.0", features = [] }
+probe-rs-debug = { version = "0.27.0", features = [] }
+reqwest = { version = "0.12.12", default-features = false, features = [
     "json",
     "native-tls",
 ] }

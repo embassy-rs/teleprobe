@@ -10,10 +10,10 @@ use log::{info, warn};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
 use probe_rs::config::MemoryRegion;
-use probe_rs::debug::{DebugInfo, DebugRegisters};
-use probe_rs::flashing::DownloadOptions;
+use probe_rs::flashing::{DownloadOptions, Format};
 use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
+use probe_rs_debug::{DebugInfo, DebugRegisters};
 
 pub const LR: RegisterId = RegisterId(14);
 pub const PC: RegisterId = RegisterId(15);
@@ -52,7 +52,7 @@ struct Runner {
     main_addr: u32,
     vector_table: VectorTable,
 
-    defmt: UpChannel,
+    defmt: Rtt,
     defmt_table: Box<Table>,
     defmt_locs: BTreeMap<u64, Location>,
     defmt_stream: Box<dyn StreamDecoder>,
@@ -162,7 +162,7 @@ impl Runner {
             dopts.verify = true;
 
             let mut loader = sess.target().flash_loader();
-            loader.load_elf_data(&mut Cursor::new(&elf_bytes))?;
+            loader.load_image(sess, &mut Cursor::new(&elf_bytes), Format::Elf, None)?;
             loader.commit(sess, dopts)?;
 
             //flashing::download_file_with_options(sess, &opts.elf, Format::Elf, dopts)?;
@@ -260,12 +260,17 @@ impl Runner {
         let current_dir = std::env::current_dir()?;
 
         let mut read_buf = [0; 1024];
-        match self.defmt.read(&mut sess.core(0).unwrap(), &mut read_buf)? {
+        match self
+            .defmt
+            .up_channel(0)
+            .unwrap()
+            .read(&mut sess.core(0).unwrap(), &mut read_buf)?
+        {
             0 => {
                 // Sleep to reduce CPU usage when defmt didn't return any data.
                 std::thread::sleep(Duration::from_millis(POLL_SLEEP_MILLIS));
                 return Ok(());
-            },
+            }
             n => self.defmt_stream.received(&read_buf[..n]),
         }
 
@@ -402,7 +407,7 @@ impl Runner {
         info!("Backtrace:");
         let di = &self.di;
         let initial_registers = DebugRegisters::from_core(core);
-        let exception_handler = probe_rs::exception_handler_for_core(core.core_type());
+        let exception_handler = probe_rs_debug::exception_handler_for_core(core.core_type());
         let instruction_set = core.instruction_set().ok();
         let stack_frames = di.unwind(core, initial_registers, exception_handler.as_ref(), instruction_set)?;
 
@@ -415,28 +420,19 @@ impl Runner {
             }
 
             if let Some(location) = &frame.source_location {
-                if location.directory.is_some() || location.file.is_some() {
-                    write!(&mut s, "\n       ").unwrap();
+                write!(&mut s, "\n       ").unwrap();
+                write!(&mut s, "{}", location.path.to_string_lossy()).unwrap();
 
-                    if let Some(dir) = &location.directory {
-                        write!(&mut s, "{}", dir.to_string_lossy()).unwrap();
-                    }
+                if let Some(line) = location.line {
+                    write!(&mut s, ":{line}").unwrap();
 
-                    if let Some(file) = &location.file {
-                        write!(&mut s, "/{file}").unwrap();
-
-                        if let Some(line) = location.line {
-                            write!(&mut s, ":{line}").unwrap();
-
-                            if let Some(col) = location.column {
-                                match col {
-                                    probe_rs::debug::ColumnType::LeftEdge => {
-                                        write!(&mut s, ":1").unwrap();
-                                    }
-                                    probe_rs::debug::ColumnType::Column(c) => {
-                                        write!(&mut s, ":{c}").unwrap();
-                                    }
-                                }
+                    if let Some(col) = location.column {
+                        match col {
+                            probe_rs_debug::ColumnType::LeftEdge => {
+                                write!(&mut s, ":1").unwrap();
+                            }
+                            probe_rs_debug::ColumnType::Column(c) => {
+                                write!(&mut s, ":{c}").unwrap();
                             }
                         }
                     }
@@ -510,7 +506,7 @@ impl Runner {
     }
 }
 
-fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<UpChannel> {
+fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Rtt> {
     const NUM_RETRIES: usize = 10; // picked at random, increase if necessary
     let mut rtt_res: Result<Rtt, probe_rs::rtt::Error> = Err(probe_rs::rtt::Error::ControlBlockNotFound);
 
@@ -518,7 +514,7 @@ fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Up
     let mut core = sess.core(0).unwrap();
 
     for try_index in 0..=NUM_RETRIES {
-        rtt_res = Rtt::attach_region(&mut core, &memory_map, &ScanRegion::Exact(rtt_addr));
+        rtt_res = Rtt::attach_region(&mut core, &ScanRegion::Exact(rtt_addr as _));
         match rtt_res {
             Ok(_) => {
                 log::debug!("Successfully attached RTT");
@@ -559,12 +555,11 @@ fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Up
         );
     }
 
-    let defmt = rtt
-        .up_channels()
-        .take(0)
+    rtt.up_channels()
+        .get(0)
         .ok_or_else(|| anyhow!("RTT up channel 0 not found"))?;
 
-    Ok(defmt)
+    Ok(rtt)
 }
 
 fn get_rtt_main_from(elf: &ElfFile) -> anyhow::Result<(Option<u32>, u32)> {
