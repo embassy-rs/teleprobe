@@ -184,6 +184,7 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         power_reset: target.power_reset,
         cycle_delay_seconds: target.cycle_delay_seconds,
         max_settle_time_millis: target.max_settle_time_millis,
+        protocol: None,
     };
 
     let timeout = {

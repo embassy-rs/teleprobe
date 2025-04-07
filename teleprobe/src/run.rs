@@ -70,7 +70,7 @@ impl Runner {
 
         let di = DebugInfo::from_raw(elf_bytes)?;
 
-        let table = Box::new(defmt_decoder::Table::parse(elf_bytes)?.unwrap());
+        let table = Box::new(defmt_decoder::Table::parse(elf_bytes)?.expect("no defmt table"));
         let locs = table.get_locations(elf_bytes)?;
         if !table.is_empty() && locs.is_empty() {
             log::warn!("insufficient DWARF info; compile your program with `debug = 2` to enable location info");

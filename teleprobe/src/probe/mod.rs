@@ -3,7 +3,7 @@ use std::time::Instant;
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use probe_rs::probe::list::Lister;
-use probe_rs::probe::{DebugProbeSelector, Probe};
+use probe_rs::probe::{DebugProbeSelector, Probe, WireProtocol};
 use probe_rs::{MemoryInterface, Permissions, Session};
 
 const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -35,6 +35,10 @@ pub struct Opts {
 
     #[clap(long, default_value = "2000")]
     pub max_settle_time_millis: u64,
+
+    /// Protocol to use for communication to probe.
+    #[clap(long)]
+    pub protocol: Option<WireProtocol>,
 }
 
 pub fn list() -> Result<()> {
@@ -130,6 +134,10 @@ pub fn connect(opts: &Opts) -> Result<Session> {
 
     if let Some(speed) = opts.speed {
         probe.set_speed(speed)?;
+    }
+
+    if let Some(protocol) = opts.protocol {
+        probe.select_protocol(protocol)?;
     }
 
     let perms = Permissions::new().allow_erase_all();
