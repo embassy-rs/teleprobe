@@ -10,7 +10,7 @@ use log::{info, warn};
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
 use probe_rs::config::MemoryRegion;
-use probe_rs::flashing::{DownloadOptions, Format};
+use probe_rs::flashing::{DownloadOptions, ElfOptions, Format};
 use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 use probe_rs_debug::{DebugInfo, DebugRegisters};
@@ -162,7 +162,12 @@ impl Runner {
             dopts.verify = true;
 
             let mut loader = sess.target().flash_loader();
-            loader.load_image(sess, &mut Cursor::new(&elf_bytes), Format::Elf, None)?;
+            loader.load_image(
+                sess,
+                &mut Cursor::new(&elf_bytes),
+                Format::Elf(ElfOptions::default()),
+                None,
+            )?;
             loader.commit(sess, dopts)?;
 
             //flashing::download_file_with_options(sess, &opts.elf, Format::Elf, dopts)?;

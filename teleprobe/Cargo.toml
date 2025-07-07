@@ -3,45 +3,41 @@ name = "teleprobe"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-anyhow = "1.0.79"
+anyhow = "1.0.98"
 base64 = "0.22.1"
-bytes = "1.5.0"
-clap = { version = "4.4.18", features = ["derive", "env"] }
-defmt-decoder = { version = "0.4.0", features = ["unstable"] }
-jsonwebtoken = "9.2.0"
-log = "0.4.20"
-object = "0.36.7"
-#probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "386f8cab84928b1e317c075ff12211ae0c4eb5e2" }
-#probe-rs = { path = "../../../probe-rs/probe-rs" }
-probe-rs = { version = "0.27.0", features = [] }
-probe-rs-debug = { version = "0.27.0", features = [] }
-reqwest = { version = "0.12.12", default-features = false, features = [
+bytes = "1.10.1"
+clap = { version = "4.5.40", features = ["derive", "env"] }
+defmt-decoder = { version = "1.0.0", features = ["unstable"] }
+jsonwebtoken = "9.3.1"
+log = "0.4.27"
+object = "0.37.1"
+probe-rs = { git = "https://github.com/akiles-dev/probe-rs", branch = "v0.29.x" }
+probe-rs-debug = { git = "https://github.com/akiles-dev/probe-rs", branch = "v0.29.x" }
+reqwest = { version = "0.12.22", default-features = false, features = [
     "json",
     "native-tls",
 ] }
-serde = "1.0.195"
-serde_json = "1.0.111"
-serde_yaml = "0.9.30"
+serde = "1.0.219"
+serde_json = "1.0.140"
+serde_yaml = "0.9.34"
 tokio = { version = "1", default-features = false, features = [] }
-url = "2.5.0"
+url = "2.5.4"
 warp = { version = "0.3", default-features = false }
 parking_lot = "0.12"
 pretty_env_logger = "0.5.0"
-chrono = { version = "0.4.31", features = ["serde"] }
-pin-project-lite = "0.2.13"
-backtrace = "0.3.69"
-futures = "0.3.30"
-walkdir = "2.4.0"
-orion = "0.17.6"
+chrono = { version = "0.4.41", features = ["serde"] }
+pin-project-lite = "0.2.16"
+backtrace = "0.3.75"
+futures = "0.3.31"
+walkdir = "2.5.0"
+orion = "0.17.11"
 hex = "0.4.3"
-nusb = "0.1.6"
-libc = "0.2.152"
+nusb = "0.1.14"
+libc = "0.2.174"
 
 [target.'cfg(not(windows))'.dependencies]
-openssl = { version = "0.10.63", optional = true }
+openssl = { version = "0.10.73", optional = true }
 
 [build-dependencies]
 git-version = "0.3.9"

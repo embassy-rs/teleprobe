@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
+use probe_rs::config::Registry;
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::{DebugProbeSelector, Probe, WireProtocol};
 use probe_rs::{MemoryInterface, Permissions, Session};
@@ -65,6 +66,8 @@ pub fn list() -> Result<()> {
 }
 
 pub fn connect(opts: &Opts) -> Result<Session> {
+    let registry = Registry::from_builtin_families();
+
     if opts.power_reset {
         let Some(selector) = &opts.probe else {
             bail!("power reset requires a serial number");
@@ -102,7 +105,7 @@ pub fn connect(opts: &Opts) -> Result<Session> {
         }
 
         let perms = Permissions::new().allow_erase_all();
-        let target = probe_rs::config::get_target_by_name(&opts.chip)?;
+        let target = registry.get_target_by_name(&opts.chip)?;
         let mut sess = probe.attach(target, perms)?;
         let mut core = sess.core(0)?;
 
@@ -142,7 +145,7 @@ pub fn connect(opts: &Opts) -> Result<Session> {
 
     let perms = Permissions::new().allow_erase_all();
 
-    let target = probe_rs::config::get_target_by_name(&opts.chip)?;
+    let target = registry.get_target_by_name(&opts.chip)?;
 
     let sess = if opts.connect_under_reset {
         probe.attach_under_reset(target, perms)?
