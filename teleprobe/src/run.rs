@@ -181,6 +181,8 @@ impl Runner {
         let (rtt_addr, main_addr) = get_rtt_main_from(&elf)?;
         let rtt_addr = rtt_addr.ok_or_else(|| anyhow!("RTT is missing"))?;
 
+        let is_rp23 = sess.target().name.to_ascii_uppercase().starts_with("RP23");
+
         {
             let mut core = sess.core(0)?;
 
@@ -194,7 +196,9 @@ impl Runner {
                 core.write_word_32(vector_table.location as _, data)?;
             }
 
-            core.reset_and_halt(TIMEOUT)?;
+            if !is_rp23 {
+                core.reset_and_halt(TIMEOUT)?;
+            }
 
             log::debug!("starting device");
             if core.available_breakpoint_units()? == 0 {
