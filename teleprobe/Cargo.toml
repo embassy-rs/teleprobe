@@ -4,43 +4,46 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.98"
+anyhow = "1.0.100"
 base64 = "0.22.1"
 bytes = "1.10.1"
-clap = { version = "4.5.40", features = ["derive", "env"] }
+clap = { version = "4.5.51", features = ["derive", "env"] }
 defmt-decoder = { version = "1.0.0", features = ["unstable"] }
-jsonwebtoken = "9.3.1"
-log = "0.4.27"
-object = "0.37.1"
-probe-rs = { git = "https://github.com/akiles-dev/probe-rs", branch = "v0.29.x" }
-probe-rs-debug = { git = "https://github.com/akiles-dev/probe-rs", branch = "v0.29.x" }
-reqwest = { version = "0.12.22", default-features = false, features = [
+jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
+log = "0.4.28"
+object = "0.37.3"
+probe-rs = { git = "https://github.com/akiles-dev/probe-rs", branch = "akiles-v0.30.x" }
+probe-rs-debug = { git = "https://github.com/akiles-dev/probe-rs", branch = "akiles-v0.30.x" }
+reqwest = { version = "0.12.24", default-features = false, features = [
     "json",
     "native-tls",
 ] }
-serde = "1.0.219"
-serde_json = "1.0.140"
+serde = "1.0.228"
+serde_json = "1.0.145"
 serde_yaml = "0.9.34"
 tokio = { version = "1", default-features = false, features = [] }
-url = "2.5.4"
-warp = { version = "0.3", default-features = false }
+url = "2.5.7"
+warp = { version = "0.4", default-features = false, features = ["server"] }
 parking_lot = "0.12"
 pretty_env_logger = "0.5.0"
-chrono = { version = "0.4.41", features = ["serde"] }
+chrono = { version = "0.4.42", features = ["serde"] }
 pin-project-lite = "0.2.16"
-backtrace = "0.3.75"
+backtrace = "0.3.76"
 futures = "0.3.31"
 walkdir = "2.5.0"
 orion = "0.17.11"
 hex = "0.4.3"
 nusb = { version = "0.2.1", features = ["tokio"] }
-libc = "0.2.174"
+libc = "0.2.177"
 
 [target.'cfg(not(windows))'.dependencies]
-openssl = { version = "0.10.73", optional = true }
+openssl = { version = "0.10.75", optional = true }
 
 [build-dependencies]
 git-version = "0.3.9"
 
 [profile.release]
 debug = 2
+
+[patch.crates-io]
+serialport = { git = "https://github.com/akiles-dev/serialport-rs" }

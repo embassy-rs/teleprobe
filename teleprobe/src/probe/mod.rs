@@ -265,7 +265,6 @@ pub(crate) async fn power_enable() -> Result<()> {
     use std::fs::File;
     use std::io::Write;
     use std::os::fd::FromRawFd;
-    use std::thread::sleep;
     use std::time::Duration;
 
     const USB_CLASS_HUB: u8 = 0x09;

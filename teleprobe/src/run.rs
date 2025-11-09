@@ -11,7 +11,7 @@ use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
 use probe_rs::config::MemoryRegion;
 use probe_rs::flashing::{DownloadOptions, ElfOptions, Format};
-use probe_rs::rtt::{Rtt, ScanRegion, UpChannel};
+use probe_rs::rtt::{Rtt, ScanRegion};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 use probe_rs_debug::{DebugInfo, DebugRegisters};
 
@@ -288,7 +288,7 @@ impl Runner {
                 Ok(frame) => {
                     let loc = self.defmt_locs.get(&frame.index());
 
-                    let (mut file, mut line, mut mod_path) = (None, None, None);
+                    let (mut file, mut line) = (None, None);
                     if let Some(loc) = loc {
                         let relpath = if let Ok(relpath) = loc.file.strip_prefix(&current_dir) {
                             relpath
@@ -298,7 +298,6 @@ impl Runner {
                         };
                         file = Some(relpath.display().to_string());
                         line = Some(loc.line as u32);
-                        mod_path = Some(loc.module.clone());
                     };
 
                     let mut timestamp = String::new();
@@ -519,7 +518,6 @@ fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Rt
     const NUM_RETRIES: usize = 10; // picked at random, increase if necessary
     let mut rtt_res: Result<Rtt, probe_rs::rtt::Error> = Err(probe_rs::rtt::Error::ControlBlockNotFound);
 
-    let memory_map = sess.target().memory_map.clone();
     let mut core = sess.core(0).unwrap();
 
     for try_index in 0..=NUM_RETRIES {

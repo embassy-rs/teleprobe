@@ -4,7 +4,7 @@ use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use bytes::Bytes;
 use log::{error, info};
 use parking_lot::Mutex;
@@ -12,7 +12,7 @@ use probe_rs::probe::list::Lister;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::spawn_blocking;
-use warp::hyper::StatusCode;
+use warp::http::StatusCode;
 use warp::reply::{html, with_status};
 use warp::{Filter, Rejection, Reply};
 
@@ -289,7 +289,9 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     let config: Config = serde_yaml::from_slice(&config)?;
 
     #[cfg(target_os = "linux")]
-    power_enable().await;
+    if let Err(e) = power_enable().await {
+        log::warn!("failed to enable power to all hubs: {:?}", e);
+    }
 
     // TODO support none or multiple oidc issuers.
     let oidc_client = match config.auths.iter().find_map(|a| match a {
@@ -326,9 +328,8 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .and_then(handle_home);
 
     info!("Listening on :{}", port);
-    warp::serve(target_run.or(list_targets).or(home))
-        .run(([0, 0, 0, 0], port))
-        .await;
+    let routes = target_run.or(list_targets).or(home);
+    warp::serve(routes).run(([0, 0, 0, 0], port)).await;
 
     Ok(())
 }
