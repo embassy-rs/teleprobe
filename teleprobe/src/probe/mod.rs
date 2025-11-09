@@ -260,7 +260,7 @@ fn to_hex(s: &str) -> String {
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn power_enable() -> Result<()> {
-    use log::info;
+    use log::{info, warn};
     use std::ffi::CString;
     use std::fs::File;
     use std::io::Write;
@@ -285,8 +285,20 @@ pub(crate) async fn power_enable() -> Result<()> {
 
         let bcd_usb = dev.usb_version();
         let location = dev.bus_id();
-        let dev = dev.open().await.unwrap();
-        let config = dev.active_configuration().unwrap();
+        let dev = match dev.open().await {
+            Ok(dev) => dev,
+            Err(_) => {
+                warn!("failed to open device");
+                continue;
+            }
+        };
+        let config = match dev.active_configuration() {
+            Ok(config) => config,
+            Err(_) => {
+                warn!("failed to open device configuration");
+                continue;
+            }
+        };
 
         let desc_type = if bcd_usb >= USB_SS_BCD {
             LIBUSB_DT_SUPERSPEED_HUB
@@ -294,11 +306,10 @@ pub(crate) async fn power_enable() -> Result<()> {
             LIBUSB_DT_HUB
         };
 
-        let desc = dev
+        let desc = match dev
             .get_descriptor(desc_type, 0, 0, Duration::from_millis(USB_CTRL_GET_TIMEOUT))
-            .await;
-
-        let desc = match desc {
+            .await
+        {
             Ok(desc) => desc,
             Err(_) => {
                 continue;
@@ -336,9 +347,16 @@ pub(crate) async fn power_enable() -> Result<()> {
                 continue;
             }
 
-            unsafe { File::from_raw_fd(disable_fd) }.write_all(b"0")?;
+            let result = unsafe { File::from_raw_fd(disable_fd) }.write_all(b"0");
 
             unsafe { libc::close(disable_fd) };
+
+            match result {
+                Err(_) => {
+                    warn!("failed to enable port {} on hub", port);
+                }
+                _ => {}
+            }
         }
     }
 
