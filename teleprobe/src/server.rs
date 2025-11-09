@@ -289,7 +289,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     let config: Config = serde_yaml::from_slice(&config)?;
 
     #[cfg(target_os = "linux")]
-    power_enable();
+    power_enable().await;
 
     // TODO support none or multiple oidc issuers.
     let oidc_client = match config.auths.iter().find_map(|a| match a {

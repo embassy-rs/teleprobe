@@ -183,7 +183,7 @@ fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn power_enable() -> Result<()> {
+pub(crate) async fn power_enable() -> Result<()> {
     anyhow::bail!("USB power reset is only supported on linux")
 }
 
@@ -259,7 +259,8 @@ fn to_hex(s: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn power_enable() -> Result<()> {
+pub(crate) async fn power_enable() -> Result<()> {
+    use log::info;
     use std::ffi::CString;
     use std::fs::File;
     use std::io::Write;
@@ -276,72 +277,70 @@ pub(crate) fn power_enable() -> Result<()> {
     const HUB_CHAR_INDV_PORT_LPSM: u8 = 0x0001;
     const USB_CTRL_GET_TIMEOUT: u64 = 5000;
 
-    Handle::current().block_on(async {
-        for dev in nusb::list_devices().await? {
-            // If the device is not a usb hub, continue
-            if dev.class() != USB_CLASS_HUB {
-                continue;
-            }
-
-            println!("usb hub found");
-
-            let bcd_usb = dev.usb_version();
-            let location = dev.bus_id();
-            let dev = dev.open().await.unwrap();
-            let config = dev.active_configuration().unwrap();
-
-            let desc_type = if bcd_usb >= USB_SS_BCD {
-                LIBUSB_DT_SUPERSPEED_HUB
-            } else {
-                LIBUSB_DT_HUB
-            };
-
-            let desc = dev
-                .get_descriptor(desc_type, 0, 0, Duration::from_millis(USB_CTRL_GET_TIMEOUT))
-                .await;
-
-            let desc = match desc {
-                Ok(desc) => desc,
-                Err(_) => {
-                    continue;
-                }
-            };
-
-            let ports = desc[2];
-
-            /* Logical Power Switching Mode */
-            let mut lpsm = desc[3] & HUB_CHAR_LPSM;
-            if lpsm == HUB_CHAR_COMMON_LPSM && ports == 1 {
-                /* For 1 port hubs, ganged power switching is the same as per-port: */
-                lpsm = HUB_CHAR_INDV_PORT_LPSM;
-            }
-
-            if lpsm == 0 {
-                continue;
-            }
-
-            for port in 1..ports {
-                let disable_path = format!(
-                    "/sys/bus/usb/devices/{}:{}/{}-port{}/disable",
-                    location,
-                    config.configuration_value(),
-                    location,
-                    port
-                );
-
-                let disable_path = CString::new(disable_path.as_str().as_bytes()).unwrap();
-
-                let disable_fd = unsafe { libc::open(disable_path.as_ptr(), libc::O_WRONLY) };
-                if disable_fd < 0 {
-                    continue;
-                }
-
-                unsafe { File::from_raw_fd(disable_fd) }.write_all(b"0")?;
-
-                unsafe { libc::close(disable_fd) };
-            }
+    for dev in nusb::list_devices().await? {
+        // If the device is not a usb hub, continue
+        if dev.class() != USB_CLASS_HUB {
+            continue;
         }
 
-        Ok(())
-    })
+        let bcd_usb = dev.usb_version();
+        let location = dev.bus_id();
+        let dev = dev.open().await.unwrap();
+        let config = dev.active_configuration().unwrap();
+
+        let desc_type = if bcd_usb >= USB_SS_BCD {
+            LIBUSB_DT_SUPERSPEED_HUB
+        } else {
+            LIBUSB_DT_HUB
+        };
+
+        let desc = dev
+            .get_descriptor(desc_type, 0, 0, Duration::from_millis(USB_CTRL_GET_TIMEOUT))
+            .await;
+
+        let desc = match desc {
+            Ok(desc) => desc,
+            Err(_) => {
+                continue;
+            }
+        };
+
+        let ports = desc[2];
+
+        /* Logical Power Switching Mode */
+        let mut lpsm = desc[3] & HUB_CHAR_LPSM;
+        if lpsm == HUB_CHAR_COMMON_LPSM && ports == 1 {
+            /* For 1 port hubs, ganged power switching is the same as per-port: */
+            lpsm = HUB_CHAR_INDV_PORT_LPSM;
+        }
+
+        if lpsm == 0 {
+            continue;
+        }
+
+        info!("Enabling hub: {}:{}", location, config.configuration_value());
+
+        for port in 1..ports {
+            let disable_path = format!(
+                "/sys/bus/usb/devices/{}:{}/{}-port{}/disable",
+                location,
+                config.configuration_value(),
+                location,
+                port
+            );
+
+            let disable_path = CString::new(disable_path.as_str().as_bytes()).unwrap();
+
+            let disable_fd = unsafe { libc::open(disable_path.as_ptr(), libc::O_WRONLY) };
+            if disable_fd < 0 {
+                continue;
+            }
+
+            unsafe { File::from_raw_fd(disable_fd) }.write_all(b"0")?;
+
+            unsafe { libc::close(disable_fd) };
+        }
+    }
+
+    Ok(())
 }
