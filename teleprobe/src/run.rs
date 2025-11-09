@@ -148,7 +148,11 @@ impl Runner {
             }
         }
 
-        let run_from_ram = run_from_ram.unwrap();
+        let run_from_ram = match run_from_ram {
+            Some(run_from_ram) => run_from_ram,
+            None => bail!("vector table not found in known memory region"),
+        };
+
         info!("run_from_ram: {:?}", run_from_ram);
 
         if !opts.do_flash {
