@@ -33,7 +33,7 @@ futures = "0.3.31"
 walkdir = "2.5.0"
 orion = "0.17.11"
 hex = "0.4.3"
-nusb = "0.1.14"
+nusb = { version = "0.2.1", features = ["tokio"] }
 libc = "0.2.174"
 
 [target.'cfg(not(windows))'.dependencies]

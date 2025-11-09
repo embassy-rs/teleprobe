@@ -19,6 +19,8 @@ use warp::{Filter, Rejection, Reply};
 use crate::auth::oidc;
 use crate::auth::oidc::Client;
 use crate::config::{Auth, Config, OidcAuthRule};
+#[cfg(target_os = "linux")]
+use crate::probe::power_enable;
 use crate::{api, probe, run};
 
 fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> anyhow::Result<()> {
@@ -285,6 +287,9 @@ struct Context {
 pub async fn serve(port: u16) -> anyhow::Result<()> {
     let config = fs::read("config.yaml")?;
     let config: Config = serde_yaml::from_slice(&config)?;
+
+    #[cfg(target_os = "linux")]
+    power_enable();
 
     // TODO support none or multiple oidc issuers.
     let oidc_client = match config.auths.iter().find_map(|a| match a {

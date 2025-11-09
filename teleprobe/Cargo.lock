@@ -1847,6 +1847,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nusb"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0226f4db3ee78f820747cf713767722877f6449d7a0fcfbf2ec3b840969763f"
+dependencies = [
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "futures-core",
+ "io-kit-sys",
+ "linux-raw-sys 0.9.4",
+ "log",
+ "once_cell",
+ "rustix 1.0.7",
+ "slab",
+ "tokio",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "object"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2139,7 +2158,7 @@ dependencies = [
  "ihex",
  "itertools",
  "jep106",
- "nusb",
+ "nusb 0.1.14",
  "object 0.36.7",
  "parking_lot",
  "probe-rs-target",
@@ -2745,7 +2764,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "log",
- "nusb",
+ "nusb 0.2.1",
  "object 0.37.1",
  "openssl",
  "orion",
