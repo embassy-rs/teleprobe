@@ -6,7 +6,6 @@ use probe_rs::config::Registry;
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::{DebugProbeSelector, Probe, WireProtocol};
 use probe_rs::{MemoryInterface, Permissions, Session};
-use tokio::runtime::Handle;
 
 const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -197,57 +196,57 @@ fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
     use std::thread::sleep;
     use std::time::Duration;
 
-    Handle::current().block_on(async {
-        let dev = nusb::list_devices()
-            .await?
-            .find(|d| {
-                let serial = d.serial_number().unwrap_or_default();
+    use nusb::MaybeFuture;
 
-                serial == probe_serial || to_hex(serial) == probe_serial
-            })
-            .ok_or_else(|| anyhow!("device with serial {} not found", probe_serial))?;
+    let dev = nusb::list_devices()
+        .wait()?
+        .find(|d| {
+            let serial = d.serial_number().unwrap_or_default();
 
-        let port_path = dev.sysfs_path().join("port");
-        let port_path = CString::new(port_path.as_os_str().as_bytes()).unwrap();
+            serial == probe_serial || to_hex(serial) == probe_serial
+        })
+        .ok_or_else(|| anyhow!("device with serial {} not found", probe_serial))?;
 
-        // The USB device goes away when we disable power to it.
-        // If we open the port dir we can keep a "handle" to it even if the device goes away, so
-        // we can write `disable=0` with openat() to reenable it.
-        let port_fd = unsafe { libc::open(port_path.as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) };
-        if port_fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
+    let port_path = dev.sysfs_path().join("port");
+    let port_path = CString::new(port_path.as_os_str().as_bytes()).unwrap();
+
+    // The USB device goes away when we disable power to it.
+    // If we open the port dir we can keep a "handle" to it even if the device goes away, so
+    // we can write `disable=0` with openat() to reenable it.
+    let port_fd = unsafe { libc::open(port_path.as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if port_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    // close port_fd on function exit
+    struct CloseFd(i32);
+    impl Drop for CloseFd {
+        fn drop(&mut self) {
+            unsafe { libc::close(self.0) };
         }
+    }
+    let _port_fd_close = CloseFd(port_fd);
 
-        // close port_fd on function exit
-        struct CloseFd(i32);
-        impl Drop for CloseFd {
-            fn drop(&mut self) {
-                unsafe { libc::close(self.0) };
-            }
-        }
-        let _port_fd_close = CloseFd(port_fd);
+    let disable_path = CString::new("disable").unwrap();
 
-        let disable_path = CString::new("disable").unwrap();
+    // disable port power
+    let disable_fd = unsafe { libc::openat(port_fd, disable_path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC) };
+    if disable_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    unsafe { File::from_raw_fd(disable_fd) }.write_all(b"1")?;
 
-        // disable port power
-        let disable_fd = unsafe { libc::openat(port_fd, disable_path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC) };
-        if disable_fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        unsafe { File::from_raw_fd(disable_fd) }.write_all(b"1")?;
+    // sleep
+    sleep(Duration::from_secs_f64(cycle_delay_seconds));
 
-        // sleep
-        sleep(Duration::from_secs_f64(cycle_delay_seconds));
+    // enable port power
+    let disable_fd = unsafe { libc::openat(port_fd, disable_path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC) };
+    if disable_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    unsafe { File::from_raw_fd(disable_fd) }.write_all(b"0")?;
 
-        // enable port power
-        let disable_fd = unsafe { libc::openat(port_fd, disable_path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC) };
-        if disable_fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        unsafe { File::from_raw_fd(disable_fd) }.write_all(b"0")?;
-
-        Ok(())
-    })
+    Ok(())
 }
 
 fn to_hex(s: &str) -> String {
