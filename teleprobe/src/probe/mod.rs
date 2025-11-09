@@ -260,101 +260,95 @@ fn to_hex(s: &str) -> String {
 #[cfg(target_os = "linux")]
 pub(crate) async fn power_enable() -> Result<()> {
     use log::{info, warn};
-    use std::ffi::CString;
-    use std::fs::File;
-    use std::io::Write;
-    use std::os::fd::FromRawFd;
+    use std::fs;
     use std::time::Duration;
+    use tokio::time::sleep;
 
     const USB_CLASS_HUB: u8 = 0x09;
-    const USB_SS_BCD: u16 = 0x0300;
-    const LIBUSB_DT_SUPERSPEED_HUB: u8 = 0x2a;
-    const LIBUSB_DT_HUB: u8 = 0x29;
-    const HUB_CHAR_LPSM: u8 = 0x0003;
-    const HUB_CHAR_COMMON_LPSM: u8 = 0x0000;
-    const HUB_CHAR_INDV_PORT_LPSM: u8 = 0x0001;
-    const USB_CTRL_GET_TIMEOUT: u64 = 5000;
+    const MAX_ITERATIONS: usize = 5;
 
-    for dev in nusb::list_devices().await? {
-        // If the device is not a usb hub, continue
-        if dev.class() != USB_CLASS_HUB {
-            continue;
-        }
+    info!("enabling power to all hubs!");
 
-        let bcd_usb = dev.usb_version();
-        let location = dev.bus_id();
-        let dev = match dev.open().await {
-            Ok(dev) => dev,
-            Err(_) => {
-                warn!("failed to open device");
-                continue;
-            }
-        };
-        let config = match dev.active_configuration() {
-            Ok(config) => config,
-            Err(_) => {
-                warn!("failed to open device configuration");
-                continue;
-            }
-        };
+    for iteration in 1..=MAX_ITERATIONS {
+        info!("Hub power enable iteration {}/{}", iteration, MAX_ITERATIONS);
+        let mut any_enabled = false;
 
-        let desc_type = if bcd_usb >= USB_SS_BCD {
-            LIBUSB_DT_SUPERSPEED_HUB
-        } else {
-            LIBUSB_DT_HUB
-        };
+        for dev in nusb::list_devices().await? {
+            // If the device is not a usb hub, continue
 
-        let desc = match dev
-            .get_descriptor(desc_type, 0, 0, Duration::from_millis(USB_CTRL_GET_TIMEOUT))
-            .await
-        {
-            Ok(desc) => desc,
-            Err(_) => {
-                continue;
-            }
-        };
-
-        let ports = desc[2];
-
-        /* Logical Power Switching Mode */
-        let mut lpsm = desc[3] & HUB_CHAR_LPSM;
-        if lpsm == HUB_CHAR_COMMON_LPSM && ports == 1 {
-            /* For 1 port hubs, ganged power switching is the same as per-port: */
-            lpsm = HUB_CHAR_INDV_PORT_LPSM;
-        }
-
-        if lpsm == 0 {
-            continue;
-        }
-
-        info!("Enabling hub: {}:{}", location, config.configuration_value());
-
-        for port in 1..ports {
-            let disable_path = format!(
-                "/sys/bus/usb/devices/{}:{}/{}-port{}/disable",
-                location,
-                config.configuration_value(),
-                location,
-                port
-            );
-
-            let disable_path = CString::new(disable_path.as_str().as_bytes()).unwrap();
-
-            let disable_fd = unsafe { libc::open(disable_path.as_ptr(), libc::O_WRONLY) };
-            if disable_fd < 0 {
+            use std::ffi::{OsStr, OsString};
+            if dev.class() != USB_CLASS_HUB {
                 continue;
             }
 
-            let result = unsafe { File::from_raw_fd(disable_fd) }.write_all(b"0");
+            let dev_path = dev.sysfs_path();
+            info!("Enabling power for hub at: {dev_path:?}");
 
-            unsafe { libc::close(disable_fd) };
+            let mut iface_name = OsString::from(dev_path.components().last().unwrap().as_os_str());
+            iface_name.push(OsStr::new(":1.0"));
 
-            match result {
-                Err(_) => {
-                    warn!("failed to enable port {} on hub", port);
+            let iface_path = dev_path.join(iface_name);
+            info!("iface_path: {iface_path:?}");
+
+            // Scan for port directories matching pattern {busdev}-port{number}
+            let entries = match fs::read_dir(&iface_path) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    warn!("Failed to read hub directory {iface_path:?}: {e}");
+                    continue;
                 }
-                _ => {}
+            };
+
+            for entry in entries {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+
+                let file_name = entry.file_name();
+                let name = file_name.to_string_lossy();
+
+                // Match directories like "1-1.4-port1", "2-3-port5", etc.
+                if name.contains("-port") && entry.path().is_dir() {
+                    let disable_path = entry.path().join("disable");
+
+                    // Read current state
+                    let current_state = match fs::read_to_string(&disable_path) {
+                        Ok(s) => s.trim().to_string(),
+                        Err(e) => {
+                            warn!("Failed to read disable file for port {name}: {e}");
+                            continue;
+                        }
+                    };
+
+                    if current_state == "0" {
+                        // Already enabled, nothing to do
+                        continue;
+                    }
+
+                    info!("Enabling port: {name} (current state: {current_state})");
+
+                    match fs::write(&disable_path, b"0") {
+                        Err(e) => {
+                            warn!("Failed to enable port {name}: {e}");
+                        }
+                        Ok(_) => {
+                            info!("Successfully enabled port {name}");
+                            any_enabled = true;
+                        }
+                    }
+                }
             }
+        }
+
+        if !any_enabled {
+            info!("No more ports to enable, done");
+            break;
+        }
+
+        if iteration < MAX_ITERATIONS {
+            info!("Waiting 20s for new hubs to appear...");
+            sleep(Duration::from_secs(20)).await;
         }
     }
 
