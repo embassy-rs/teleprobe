@@ -58,6 +58,8 @@ struct Runner {
     defmt_stream: Box<dyn StreamDecoder>,
 
     di: DebugInfo,
+
+    exports: BTreeMap<String, u32>,
 }
 
 unsafe fn fuck_it<'a, 'b, T>(wtf: &'a T) -> &'b T {
@@ -118,6 +120,36 @@ impl Runner {
 
         let vector_table = vector_table.ok_or_else(|| anyhow!("`.vector_table` section is missing"))?;
         log::debug!("vector table: {:x?}", vector_table);
+
+        // Build a map of exported variables, based on addresses found in the
+        // '.teleprobe.export' section.
+        let mut export_map = BTreeMap::new();
+
+        if let Some(section) = elf.section_by_name(".teleprobe.export") {
+            let ptrs = section
+                .data()?
+                .chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect::<Vec<_>>();
+
+            if ptrs.len() > 0 {
+                info!("Found {} exported variables: {:#0x?}", ptrs.len(), ptrs);
+
+                // TODO: Is there a better way?
+                for symbol in elf.symbols() {
+                    if ptrs.contains(&(symbol.address() as u32)) {
+                        let addr = symbol.address() as u32;
+                        let name = String::from(symbol.name().unwrap());
+                        // Filter out private symbols, otherwise we get some false-positives
+                        if name.starts_with("__") {
+                            continue;
+                        }
+                        export_map.insert(String::from(symbol.name().unwrap()), addr);
+                        info!("Found match for addr {:?} -> {:?}", &addr, &name);
+                    }
+                }
+            }
+        }
 
         // reset ALL cores other than the main one.
         // This is needed for rp2040 core1.
@@ -266,6 +298,7 @@ impl Runner {
             defmt,
             defmt_stream,
             di,
+            exports: export_map,
         })
     }
 
@@ -374,6 +407,30 @@ impl Runner {
             bail!("Firmware crashed");
         }
 
+        // Look up exported symbols
+        for (symbol, addr) in &self.exports {
+            let mut buf = [0; 64];
+            /*
+            // XXX: Ideally we should use demangling information to
+            // either handle references ie bytestrings are stored as
+            // pointers to data. But for now, we only support hardcoded
+            // byte arrays of length 64.
+            let ptr = core.read_word_32(*addr as u64).unwrap();
+            let _ = core.read(ptr as u64, &mut buf).unwrap();
+            */
+            // TODO: Error handling?
+            let _ = core.read(*addr as u64, &mut buf).unwrap();
+            match String::from_utf8(buf.to_vec()) {
+                Ok(s) => {
+                    info!("Found: {} -> {}", symbol, s);
+                }
+                Err(_) => {
+                    warn!("Data for {} not found!", symbol);
+                }
+            }
+        }
+        // TODO: Export our wanted symbols?
+
         Ok(())
     }
 
@@ -460,7 +517,7 @@ impl Runner {
     fn dump_state(&mut self, core: &mut Core, force: bool) -> anyhow::Result<bool> {
         core.halt(TIMEOUT)?;
 
-        // determine if the target is handling an interupt
+        // determine if the target is handling an interrupt
         let xpsr: u32 = core.read_core_reg(XPSR)?;
         let exception_number = xpsr & 0xff;
         match exception_number {
