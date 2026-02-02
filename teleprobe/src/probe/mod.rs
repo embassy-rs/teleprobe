@@ -160,7 +160,7 @@ pub fn connect(opts: &Opts) -> Result<Session> {
 fn open_probe(opts: &Opts) -> Result<Probe> {
     let lister = Lister::new();
 
-    match &opts.probe {
+    match opts.probe.clone() {
         None => {
             let probes = lister.list_all();
             if probes.is_empty() {
@@ -177,7 +177,7 @@ fn open_probe(opts: &Opts) -> Result<Probe> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
+fn power_reset(_probe_serial: &str, _cycle_delay_seconds: f64) -> Result<()> {
     anyhow::bail!("USB power reset is only supported on linux")
 }
 
@@ -259,9 +259,10 @@ fn to_hex(s: &str) -> String {
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn power_enable() -> Result<()> {
-    use log::{info, warn};
     use std::fs;
     use std::time::Duration;
+
+    use log::{info, warn};
     use tokio::time::sleep;
 
     const USB_CLASS_HUB: u8 = 0x09;
