@@ -12,8 +12,8 @@ defmt-decoder = { version = "1.0.0", features = ["unstable"] }
 jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
 log = "0.4.28"
 object = "0.37.3"
-probe-rs = { git = "https://github.com/akiles-dev/probe-rs", branch = "akiles-v0.30.x" }
-probe-rs-debug = { git = "https://github.com/akiles-dev/probe-rs", branch = "akiles-v0.30.x" }
+probe-rs = "0.31"
+probe-rs-debug = "0.31"
 reqwest = { version = "0.12.24", default-features = false, features = [
     "json",
     "native-tls",
@@ -44,6 +44,3 @@ git-version = "0.3.9"
 
 [profile.release]
 debug = 2
-
-[patch.crates-io]
-serialport = { git = "https://github.com/akiles-dev/serialport-rs" }
