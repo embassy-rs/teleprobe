@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::ops::Add;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
@@ -52,6 +53,10 @@ pub struct RunCommand {
 
     /// ELF files to flash+run
     files: Vec<String>,
+
+    /// Number of times to retry a failure
+    #[clap(long)]
+    retries: Option<u8>,
 
     /// Recursively run all files under the given directories
     #[clap(short)]
@@ -157,11 +162,28 @@ struct RunArgs {
     timeout: Option<u64>,
 }
 
-async fn run_job(client: &Client, creds: &Credentials, job: Job, show_output: bool) -> (bool, String) {
+async fn run_job(
+    client: &Client,
+    creds: &Credentials,
+    job: Job,
+    show_output: bool,
+    retries: Option<u8>,
+) -> Result<Job, Job> {
+    for _ in 0..retries.unwrap_or_default().add(1) {
+        match run_job_inner(client, creds, &job, show_output).await {
+            Ok(_) => return Ok(job),
+            _ => {}
+        }
+    }
+
+    Err(job)
+}
+
+async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_output: bool) -> Result<(), ()> {
     let res = client
         .post(format!("{}/targets/{}/run", creds.host, job.target))
         .query(&RunArgs { timeout: job.timeout })
-        .body(job.elf)
+        .body(job.elf.clone())
         .bearer_auth(&creds.token)
         .send()
         .await;
@@ -190,12 +212,12 @@ async fn run_job(client: &Client, creds: &Credentials, job: Job, show_output: bo
             if show_output {
                 info!("{}", logs);
             }
-            (true, job.hash.clone())
+            Ok(())
         }
         Err(e) => {
             error!("=== {} {}: FAILED: {}", job.target, job.path.display(), e);
             error!("{}", logs);
-            (false, String::new())
+            Err(())
         }
     }
 }
@@ -291,7 +313,7 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
         .flat_map_unordered(None, |(_, jobs)| {
             let client = &client;
             stream::iter(jobs)
-                .map(move |job| run_job(client, creds, job, cmd.show_output))
+                .map(move |job| run_job(client, creds, job, cmd.show_output, cmd.retries))
                 .buffer_unordered(2)
         })
         .collect()
@@ -299,14 +321,14 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
 
     let mut succeeded = skipped_jobs.len();
     let mut failed = 0usize;
-    for (r, hash) in results {
+    for r in results {
         match r {
-            true => {
-                after_cache.files.insert(hash);
+            Ok(job) => {
+                after_cache.files.insert(job.hash.clone());
 
                 succeeded += 1
             }
-            false => failed += 1,
+            Err(_) => failed += 1,
         }
     }
 
