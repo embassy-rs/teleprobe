@@ -308,7 +308,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         target_locks: HashMap::new(),
     }));
 
-    let target_run: _ = warp::path!("targets" / String / "run")
+    let target_run = warp::path!("targets" / String / "run")
         .and(warp::post())
         .and(check_auth_filter(context.clone()))
         .and(warp::query())
@@ -316,13 +316,13 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .and(with_val(context.clone()))
         .and_then(handle_run);
 
-    let list_targets: _ = warp::path!("targets")
+    let list_targets = warp::path!("targets")
         .and(warp::get())
         .and(check_auth_filter(context.clone()))
         .and(with_val(context.clone()))
         .and_then(handle_list_targets);
 
-    let home: _ = warp::path!()
+    let home = warp::path!()
         .and(warp::get())
         .and(with_val(context.clone()))
         .and_then(handle_home);

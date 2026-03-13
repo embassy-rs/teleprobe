@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 #[allow(dead_code)]
 #[derive(Clone, Deserialize)]

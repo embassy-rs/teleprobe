@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use probe_rs::config::Registry;
 use probe_rs::probe::list::Lister;
@@ -77,7 +77,7 @@ pub fn connect(opts: &Opts) -> Result<Session> {
         };
 
         log::debug!("probe power reset");
-        if let Err(err) = power_reset(&selector.serial_number.as_ref().unwrap(), 1.0) {
+        if let Err(err) = power_reset(selector.serial_number.as_ref().unwrap(), 1.0) {
             log::warn!("power reset failed for: {}", err);
         }
     }
@@ -109,8 +109,8 @@ pub fn connect(opts: &Opts) -> Result<Session> {
         let mut sess = probe.attach(target, perms)?;
         let mut core = sess.core(0)?;
 
-        const PSM_FRCE_ON: u64 = 0x40010000;
-        const PSM_FRCE_OFF: u64 = 0x40010004;
+        const _PSM_FRCE_ON: u64 = 0x40010000;
+        const _PSM_FRCE_OFF: u64 = 0x40010004;
         const PSM_WDSEL: u64 = 0x40010008;
 
         const PSM_SEL_SIO: u32 = 1 << 14;
@@ -182,12 +182,14 @@ fn power_reset(_probe_serial: &str, _cycle_delay_seconds: f64) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(unused)]
 pub(crate) async fn power_enable() -> Result<()> {
     anyhow::bail!("USB power reset is only supported on linux")
 }
 
 #[cfg(target_os = "linux")]
 fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
+    use anyhow::anyhow;
     use std::ffi::CString;
     use std::fs::File;
     use std::io::Write;
@@ -249,6 +251,7 @@ fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
     Ok(())
 }
 
+#[allow(unused)]
 fn to_hex(s: &str) -> String {
     use std::fmt::Write;
     s.as_bytes().iter().fold(String::new(), |mut s, b| {
