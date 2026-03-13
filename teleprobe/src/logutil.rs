@@ -2,15 +2,15 @@ use core::any::Any;
 use core::pin::Pin;
 use std::cell::{Cell, RefCell};
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe, UnwindSafe};
+use std::panic::{AssertUnwindSafe, UnwindSafe, catch_unwind};
 use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 use chrono::{DateTime, Utc};
 use log::{LevelFilter, Log, Record};
 use pin_project_lite::pin_project;
-use pretty_env_logger::env_logger::filter::{self, Filter};
 use pretty_env_logger::env_logger::Logger;
+use pretty_env_logger::env_logger::filter::{self, Filter};
 use serde::{Deserialize, Serialize};
 
 static LOGGER: OnceLock<CaptureLogger> = OnceLock::new();
@@ -66,7 +66,7 @@ where
 }
 
 thread_local! {
-    pub static CAPTURE: RefCell<Option<Vec<LogEntry>>> = RefCell::new(None);
+    pub static CAPTURE: RefCell<Option<Vec<LogEntry>>> = const { RefCell::new(None) };
 }
 
 struct CaptureLogger {
@@ -261,7 +261,7 @@ mod log_panics {
 }
 
 thread_local! {
-     static CATCHING_UNWIND: Cell<bool> = Cell::new(false);
+     static CATCHING_UNWIND: Cell<bool> = const { Cell::new(false) };
 }
 
 pin_project! {

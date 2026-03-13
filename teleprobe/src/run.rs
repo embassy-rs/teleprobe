@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use log::{info, warn};
-use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use object::ObjectSymbol;
+use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use probe_rs::config::MemoryRegion;
 use probe_rs::flashing::{DownloadOptions, ElfOptions, Format};
 use probe_rs::rtt::{Rtt, ScanRegion};
@@ -48,9 +48,9 @@ pub fn run(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Resul
 struct Runner {
     opts: Options,
 
-    rtt_addr: u32,
-    main_addr: u32,
-    vector_table: VectorTable,
+    _rtt_addr: u32,
+    _main_addr: u32,
+    _vector_table: VectorTable,
 
     defmt: Rtt,
     defmt_table: Box<Table>,
@@ -60,8 +60,8 @@ struct Runner {
     di: DebugInfo,
 }
 
-unsafe fn fuck_it<'a, 'b, T>(wtf: &'a T) -> &'b T {
-    std::mem::transmute(wtf)
+unsafe fn fuck_it<'b, T>(wtf: &T) -> &'b T {
+    unsafe { std::mem::transmute(wtf) }
 }
 
 impl Runner {
@@ -258,9 +258,9 @@ impl Runner {
 
         Ok(Self {
             opts,
-            rtt_addr,
-            main_addr,
-            vector_table,
+            _rtt_addr: rtt_addr,
+            _main_addr: main_addr,
+            _vector_table: vector_table,
             defmt_table: table,
             defmt_locs: locs,
             defmt,
@@ -347,13 +347,13 @@ impl Runner {
         let mut was_halted = false;
 
         loop {
-            if let Some(deadline) = self.opts.deadline {
-                if Instant::now() > deadline {
-                    warn!("Deadline exceeded!");
-                    let mut core = sess.core(0)?;
-                    self.dump_state(&mut core, true)?;
-                    bail!("Deadline exceeded")
-                }
+            if let Some(deadline) = self.opts.deadline
+                && Instant::now() > deadline
+            {
+                warn!("Deadline exceeded!");
+                let mut core = sess.core(0)?;
+                self.dump_state(&mut core, true)?;
+                bail!("Deadline exceeded")
             }
 
             self.poll(sess)?;
@@ -408,7 +408,7 @@ impl Runner {
             info!(
                 "{:08x}: {:08x} {:08x} {:08x} {:08x}",
                 r[13] + i as u32 * 16,
-                stack[i * 4 + 0],
+                stack[i * 4],
                 stack[i * 4 + 1],
                 stack[i * 4 + 2],
                 stack[i * 4 + 3],
@@ -567,7 +567,7 @@ fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Rt
     }
 
     rtt.up_channels()
-        .get(0)
+        .first()
         .ok_or_else(|| anyhow!("RTT up channel 0 not found"))?;
 
     Ok(rtt)

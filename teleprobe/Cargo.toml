@@ -1,43 +1,43 @@
 [package]
 name = "teleprobe"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.102"
 base64 = "0.22.1"
-bytes = "1.10.1"
-clap = { version = "4.5.51", features = ["derive", "env"] }
-defmt-decoder = { version = "1.0.0", features = ["unstable"] }
-jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
-log = "0.4.28"
-object = "0.37.3"
+bytes = "1.11.1"
+clap = { version = "4.6.0", features = ["derive", "env"] }
+defmt-decoder = { version = "1.1.0", features = ["unstable"] }
+jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
+log = "0.4.29"
+object = "0.38.1"
 probe-rs = "0.31"
 probe-rs-debug = "0.31"
-reqwest = { version = "0.12.24", default-features = false, features = [
+reqwest = { version = "0.13.2", default-features = false, features = [
     "json",
     "native-tls",
+    "query",
 ] }
 serde = "1.0.228"
-serde_json = "1.0.145"
+serde_json = "1.0.149"
 serde_yaml = "0.9.34"
 tokio = { version = "1", default-features = false, features = [] }
-url = "2.5.7"
+url = "2.5.8"
 warp = { version = "0.4", default-features = false, features = ["server"] }
 parking_lot = "0.12"
 pretty_env_logger = "0.5.0"
-chrono = { version = "0.4.42", features = ["serde"] }
-pin-project-lite = "0.2.16"
+chrono = { version = "0.4.44", features = ["serde"] }
+pin-project-lite = "0.2.17"
 backtrace = "0.3.76"
-futures = "0.3.31"
+futures = "0.3.32"
 walkdir = "2.5.0"
-orion = "0.17.11"
-hex = "0.4.3"
-nusb = { version = "0.2.1", features = ["tokio"] }
-libc = "0.2.177"
+nusb = { version = "0.2.3", features = ["tokio"] }
+libc = "0.2.183"
+blake3 = "1.8.3"
 
 [target.'cfg(not(windows))'.dependencies]
-openssl = { version = "0.10.75", optional = true }
+openssl = { version = "0.10.76", optional = true }
 
 [build-dependencies]
 git-version = "0.3.9"

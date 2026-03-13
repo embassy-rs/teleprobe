@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context};
-use futures::{stream, StreamExt};
+use anyhow::{Context, bail};
+use blake3::Hasher;
+use futures::{StreamExt, stream};
 use log::{error, info, warn};
 use object::{Object, ObjectSection};
-use orion::hazardous::hash::blake2::blake2b::Blake2b;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -90,7 +90,7 @@ struct ElfMetadata {
 }
 
 impl ElfMetadata {
-    fn from_elf(elf: &[u8]) -> anyhow::Result<(Self, Blake2b)> {
+    fn from_elf(elf: &[u8]) -> anyhow::Result<(Self, Hasher)> {
         let mut target = None;
         let mut timeout = None;
 
@@ -115,14 +115,14 @@ impl ElfMetadata {
             }
         }
 
-        let mut hasher = Blake2b::new(32)?;
+        let mut hasher = Hasher::new();
         for section in &mut obj_file.sections() {
             let section_name = match section.name() {
                 Ok(name) => name,
                 _ => continue,
             };
 
-            if section_name == "" || section_name.starts_with(".debug_") {
+            if section_name.is_empty() || section_name.starts_with(".debug_") {
                 continue;
             }
 
@@ -133,9 +133,10 @@ impl ElfMetadata {
 
             let section_address = section.address();
 
-            hasher.update(section_name.as_bytes())?;
-            hasher.update(section_data)?;
-            hasher.update(&section_address.to_le_bytes())?;
+            hasher
+                .update(section_name.as_bytes())
+                .update(section_data)
+                .update(&section_address.to_le_bytes());
         }
 
         Ok((Self { target, timeout }, hasher))
@@ -212,7 +213,7 @@ fn load_cache(cache: Option<String>) -> Cache {
 
     match serde_json::from_reader(&cache_file) {
         Ok(cache) => cache,
-        _ => return Cache::default(),
+        _ => Cache::default(),
     }
 }
 
@@ -250,11 +251,11 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
             .or(meta.target)
             .context("You have to either set --target, or embed it in the ELF using the `teleprobe-meta` crate.")?;
 
-        hasher.update(target.as_bytes())?;
-        hasher.update(&meta.timeout.unwrap_or_default().to_le_bytes())?;
+        hasher
+            .update(target.as_bytes())
+            .update(&meta.timeout.unwrap_or_default().to_le_bytes());
 
-        let digest = hasher.finalize()?;
-        let hash = hex::encode(&digest);
+        let hash = hasher.finalize().to_string();
 
         if before_cache.files.contains(&hash) {
             skipped_jobs.push((target, path.clone()));

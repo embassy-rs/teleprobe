@@ -10,22 +10,51 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        build: [debug, release]
     steps:
       - name: Install libusb, libudev (linux)
+        if: runner.os == 'ubuntu-latest'
         run: |
-          sudo apt update
-          sudo apt install -y libusb-1.0-0-dev libudev-dev
+            sudo apt update
+            sudo apt install -y libusb-1.0-0-dev libudev-dev
 
       - uses: actions/checkout@v2
 
-      - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v1.3.0
-        
-      - name: Build
-        run: |
-          cargo build --manifest-path teleprobe/Cargo.toml
-          cargo build --manifest-path teleprobe/Cargo.toml --release
-          cargo test --manifest-path teleprobe/Cargo.toml
-          cargo test --manifest-path teleprobe/Cargo.toml --release
-    
+      - name: ⚡ Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.build }}
+
+      - name: Check (debug)
+        if: matrix.build == 'debug'
+        run: cargo check --manifest-path teleprobe/Cargo.toml         
+
+      - name: Check (release)
+        if: matrix.build == 'release'
+        run: cargo check --manifest-path teleprobe/Cargo.toml --release
+
+
+      - name: Build (debug)
+        if: matrix.build == 'debug'
+        run: cargo build --manifest-path teleprobe/Cargo.toml
+
+      - name: Build (release)
+        if: matrix.build == 'release'
+        run: cargo build --manifest-path teleprobe/Cargo.toml --release
+
+
+      - name: Test (debug)
+        if: matrix.build == 'debug'
+        run: cargo test --manifest-path teleprobe/Cargo.toml
+
+      - name: Test (release)
+        if: matrix.build == 'release'
+        run: cargo test --manifest-path teleprobe/Cargo.toml --release
