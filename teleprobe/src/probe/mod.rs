@@ -189,7 +189,6 @@ pub(crate) async fn power_enable() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
-    use anyhow::anyhow;
     use std::ffi::CString;
     use std::fs::File;
     use std::io::Write;
@@ -198,6 +197,7 @@ fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
     use std::thread::sleep;
     use std::time::Duration;
 
+    use anyhow::anyhow;
     use nusb::MaybeFuture;
 
     let dev = nusb::list_devices()

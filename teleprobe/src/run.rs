@@ -11,7 +11,7 @@ use object::ObjectSymbol;
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use probe_rs::config::MemoryRegion;
 use probe_rs::flashing::{DownloadOptions, ElfOptions, Format};
-use probe_rs::rtt::{Rtt, ScanRegion};
+use probe_rs::rtt::{self, Rtt, ScanRegion};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 use probe_rs_debug::{DebugInfo, DebugRegisters};
 
@@ -48,7 +48,7 @@ pub fn run(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Resul
 struct Runner {
     opts: Options,
 
-    _rtt_addr: u32,
+    rtt_addr: u32,
     _main_addr: u32,
     _vector_table: VectorTable,
 
@@ -258,7 +258,7 @@ impl Runner {
 
         Ok(Self {
             opts,
-            _rtt_addr: rtt_addr,
+            rtt_addr: rtt_addr,
             _main_addr: main_addr,
             _vector_table: vector_table,
             defmt_table: table,
@@ -273,18 +273,45 @@ impl Runner {
         let current_dir = std::env::current_dir()?;
 
         let mut read_buf = [0; 1024];
-        match self
+        let needs_rtt = match self
             .defmt
             .up_channel(0)
             .unwrap()
-            .read(&mut sess.core(0).unwrap(), &mut read_buf)?
+            .read(&mut sess.core(0).unwrap(), &mut read_buf)
         {
-            0 => {
+            Ok(0) => {
                 // Sleep to reduce CPU usage when defmt didn't return any data.
                 std::thread::sleep(Duration::from_millis(POLL_SLEEP_MILLIS));
                 return Ok(());
             }
-            n => self.defmt_stream.received(&read_buf[..n]),
+            Ok(n) => {
+                self.defmt_stream.received(&read_buf[..n]);
+
+                false
+            }
+            Err(rtt::Error::ControlBlockCorrupted(error)) => {
+                warn!("RTT control block corrupted ({error}), re-attaching");
+
+                true
+            }
+            Err(rtt::Error::ReadPointerChanged) => {
+                warn!("RTT read pointer changed, re-attaching");
+
+                true
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        if needs_rtt {
+            // Sleep to reduce CPU usage when defmt didn't return any data.
+            std::thread::sleep(Duration::from_millis(POLL_SLEEP_MILLIS));
+
+            match setup_logging_channel(self.rtt_addr, sess) {
+                Ok(rtt) => self.defmt = rtt,
+                _ => {}
+            }
+
+            return Ok(());
         }
 
         loop {
