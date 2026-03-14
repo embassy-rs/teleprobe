@@ -88,6 +88,16 @@ struct Cache {
     files: HashSet<String>,
 }
 
+impl Cache {
+    pub fn contains(&self, hash: &String) -> bool {
+        self.files.contains(hash)
+    }
+
+    pub fn insert(&mut self, hash: String) -> bool {
+        self.files.insert(hash)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ElfMetadata {
     target: Option<String>,
@@ -257,11 +267,10 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
         cmd.files.iter().map(|f| f.into()).collect()
     };
 
-    let before_cache = load_cache(cmd.cache.clone());
-    let mut after_cache = Cache::default();
+    let cache = load_cache(cmd.cache.clone());
     let job_count = files.len();
     let mut jobs_by_target: HashMap<String, Vec<Job>> = HashMap::new();
-    let mut skipped_jobs: Vec<_> = Vec::new();
+    let mut skipped_jobs: Vec<Job> = Vec::new();
 
     for path in files {
         let elf: Vec<u8> = std::fs::read(&path)?;
@@ -278,21 +287,19 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
             .update(&meta.timeout.unwrap_or_default().to_le_bytes());
 
         let hash = hasher.finalize().to_string();
-
-        if before_cache.files.contains(&hash) {
-            skipped_jobs.push((target, path.clone()));
-            after_cache.files.insert(hash);
-
-            continue;
-        }
-
         // Override timeout if requested
         let timeout = match cmd.timeout {
             Some(_) => cmd.timeout,
             None => meta.timeout,
         };
 
-        jobs_by_target.entry(target.clone()).or_default().push(Job {
+        let jobs = if cache.contains(&hash) {
+            &mut skipped_jobs
+        } else {
+            jobs_by_target.entry(target.clone()).or_default()
+        };
+
+        jobs.push(Job {
             path,
             target,
             elf,
@@ -303,8 +310,8 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
 
     info!("Running {} jobs across {} targets...", job_count, jobs_by_target.len());
 
-    for (target, path) in &skipped_jobs {
-        info!("=== {} {}: SKIPPED", target, path.display());
+    for job in &skipped_jobs {
+        info!("=== {} {}: SKIPPED", job.target, job.path.display());
     }
 
     let client = reqwest::Client::new();
@@ -321,10 +328,14 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
 
     let mut succeeded = skipped_jobs.len();
     let mut failed = 0usize;
+    let mut cache = Cache {
+        files: skipped_jobs.into_iter().map(|job| job.hash).collect(),
+    };
+
     for r in results {
         match r {
             Ok(job) => {
-                after_cache.files.insert(job.hash.clone());
+                cache.insert(job.hash.clone());
 
                 succeeded += 1
             }
@@ -332,15 +343,15 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
         }
     }
 
-    cmd.cache.map(|cache| {
-        let cache_file = match File::create(&cache) {
+    cmd.cache.map(|cache_path| {
+        let cache_file = match File::create(&cache_path) {
             Ok(cache_file) => cache_file,
             _ => return,
         };
 
-        match serde_json::to_writer(cache_file, &after_cache) {
-            Ok(_) => println!("saved cache to {}", &cache),
-            Err(_) => println!("failed to saved cache to {}", &cache),
+        match serde_json::to_writer(cache_file, &cache) {
+            Ok(_) => println!("saved cache to {}", &cache_path),
+            Err(_) => println!("failed to saved cache to {}", &cache_path),
         };
 
         // I assume the file is closed when it's dropped here
