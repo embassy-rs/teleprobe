@@ -28,6 +28,14 @@ const POLL_SLEEP_MILLIS: u64 = 100;
 pub struct Options {
     pub do_flash: bool,
     pub deadline: Option<Instant>,
+    /// Skip the post-load `reset_and_halt` that normally happens right before
+    /// PC/SP/VTOR are written. Some chips (e.g. NXP RT685S, RP23xx) power-cycle
+    /// on-chip SRAM during a warm reset, which corrupts the program we just
+    /// loaded.
+    ///
+    /// This is OR-ed with a chip-name auto-detect inside `run`, so RP23xx
+    /// always skips regardless of this flag.
+    pub skip_reset: bool,
 }
 
 impl Default for Options {
@@ -35,6 +43,7 @@ impl Default for Options {
         Self {
             do_flash: true,
             deadline: None,
+            skip_reset: false,
         }
     }
 }
@@ -182,6 +191,7 @@ impl Runner {
         let rtt_addr = rtt_addr.ok_or_else(|| anyhow!("RTT is missing"))?;
 
         let is_rp23 = sess.target().name.to_ascii_uppercase().starts_with("RP23");
+        let skip_reset = opts.skip_reset || is_rp23;
 
         {
             let mut core = sess.core(0)?;
@@ -196,7 +206,7 @@ impl Runner {
                 core.write_word_32(vector_table.location as _, data)?;
             }
 
-            if !is_rp23 {
+            if !skip_reset {
                 core.reset_and_halt(TIMEOUT)?;
             }
 
