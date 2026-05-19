@@ -41,6 +41,15 @@ enum LocalCommand {
         #[clap(short)]
         timeout: Option<u64>,
 
+        /// Skip the post-load reset before starting the program.
+        ///
+        /// Use this on chips whose warm reset power-cycles or erases on-chip
+        /// SRAM (e.g. NXP RT685S) and would otherwise corrupt the
+        /// freshly-loaded image. RP23xx is auto-detected and always skips
+        /// regardless of this flag.
+        #[clap(long)]
+        no_reset: bool,
+
         #[clap(flatten)]
         probe: crate::probe::Opts,
     },
@@ -66,12 +75,18 @@ async fn async_main() -> anyhow::Result<()> {
     match cli {
         Cli::Local { command } => match command {
             LocalCommand::ListProbes => crate::probe::list(),
-            LocalCommand::Run { file, timeout, probe } => {
+            LocalCommand::Run {
+                file,
+                timeout,
+                no_reset,
+                probe,
+            } => {
                 let elf = std::fs::read(file)?;
                 let mut sess = crate::probe::connect(&probe)?;
 
                 let opts = Options {
                     deadline: timeout.map(|t| Instant::now() + Duration::from_secs(t)),
+                    skip_reset: no_reset,
                     ..Default::default()
                 };
                 crate::run::run(&mut sess, &elf, opts)
