@@ -12,8 +12,8 @@ defmt-decoder = { version = "1.1.0", features = ["unstable"] }
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 log = "0.4.29"
 object = "0.38.1"
-probe-rs = "0.31"
-probe-rs-debug = "0.31"
+probe-rs = "0.32"
+probe-rs-debug = "0.32"
 reqwest = { version = "0.13.2", default-features = false, features = [
     "json",
     "native-tls",

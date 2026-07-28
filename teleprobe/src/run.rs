@@ -10,7 +10,7 @@ use log::{info, warn};
 use object::ObjectSymbol;
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use probe_rs::config::MemoryRegion;
-use probe_rs::flashing::{DownloadOptions, ElfOptions, Format};
+use probe_rs::flashing::{DownloadOptions, ElfLoader, ElfOptions};
 use probe_rs::rtt::{self, Rtt, ScanRegion};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 use probe_rs_debug::{DebugInfo, DebugRegisters};
@@ -178,7 +178,7 @@ impl Runner {
             loader.load_image(
                 sess,
                 &mut Cursor::new(&elf_bytes),
-                Format::Elf(ElfOptions::default()),
+                ElfLoader(ElfOptions::default()),
                 None,
             )?;
             loader.commit(sess, dopts)?;
