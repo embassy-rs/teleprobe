@@ -12,9 +12,9 @@
 #[macro_export]
 macro_rules! target {
     ($val:literal) => {
-        #[link_section = ".teleprobe.target"]
+        #[unsafe(link_section = ".teleprobe.target")]
         #[used]
-        #[no_mangle] // prevent invoking the macro multiple times
+        #[unsafe(no_mangle)] // prevent invoking the macro multiple times
         static _TELEPROBE_TARGET: [u8; $val.len()] = *$val;
     };
 }
@@ -27,9 +27,9 @@ macro_rules! target {
 #[macro_export]
 macro_rules! timeout {
     ($val:literal) => {
-        #[link_section = ".teleprobe.timeout"]
+        #[unsafe(link_section = ".teleprobe.timeout")]
         #[used]
-        #[no_mangle] // prevent invoking the macro multiple times
+        #[unsafe(no_mangle)] // prevent invoking the macro multiple times
         static _TELEPROBE_TIMEOUT: u32 = $val;
     };
 }
