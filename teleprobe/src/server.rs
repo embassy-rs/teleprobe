@@ -23,21 +23,35 @@ use crate::config::{Auth, Config, OidcAuthRule};
 use crate::probe::power_enable;
 use crate::{api, probe, run};
 
-fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> anyhow::Result<()> {
-    let mut sess = probe::connect(&probe)?;
-
-    let opts = run::Options {
-        deadline: Some(Instant::now() + timeout),
-        ..Default::default()
-    };
-    run::run(&mut sess, &elf, opts)?;
-
-    Ok(())
+/// Runs firmware on a target. Abstracted so the server can be tested without hardware.
+trait Runner: Send + Sync {
+    fn run(&self, elf: &[u8], probe: &probe::Opts, timeout: Duration) -> anyhow::Result<()>;
 }
 
-async fn run_with_log_capture(elf: Bytes, probe: probe::Opts, timeout: Duration) -> (bool, Vec<u8>) {
+struct ProbeRunner;
+
+impl Runner for ProbeRunner {
+    fn run(&self, elf: &[u8], probe: &probe::Opts, timeout: Duration) -> anyhow::Result<()> {
+        let mut sess = probe::connect(probe)?;
+
+        let opts = run::Options {
+            deadline: Some(Instant::now() + timeout),
+            ..Default::default()
+        };
+        run::run(&mut sess, elf, opts)?;
+
+        Ok(())
+    }
+}
+
+async fn run_with_log_capture(
+    runner: Arc<dyn Runner>,
+    elf: Bytes,
+    probe: probe::Opts,
+    timeout: Duration,
+) -> (bool, Vec<u8>) {
     let (ok, entries) = spawn_blocking(move || {
-        crate::logutil::with_capture(|| match run_firmware_on_device(elf, probe, timeout) {
+        crate::logutil::with_capture(|| match runner.run(&elf, &probe, timeout) {
             Ok(()) => true,
             Err(e) => {
                 error!("Run failed: {:?}", e);
@@ -189,12 +203,14 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         protocol: None,
     };
 
-    let timeout = {
-        let config = &mut cx.lock().config;
-        Duration::from_secs(args.timeout.unwrap_or(config.default_timeout).min(config.max_timeout))
+    let (timeout, runner) = {
+        let context = cx.lock();
+        let config = &context.config;
+        let timeout = Duration::from_secs(args.timeout.unwrap_or(config.default_timeout).min(config.max_timeout));
+        (timeout, context.runner.clone())
     };
 
-    let (ok, logs) = run_with_log_capture(elf, probe, timeout).await;
+    let (ok, logs) = run_with_log_capture(runner, elf, probe, timeout).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
 
     Ok(with_status(logs, status))
@@ -282,6 +298,7 @@ struct Context {
     oidc_client: Option<oidc::Client>,
     config: Config,
     target_locks: HashMap<String, Arc<AsyncMutex<()>>>,
+    runner: Arc<dyn Runner>,
 }
 
 pub async fn serve(port: u16) -> anyhow::Result<()> {
@@ -306,8 +323,16 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         oidc_client,
         config,
         target_locks: HashMap::new(),
+        runner: Arc::new(ProbeRunner),
     }));
 
+    info!("Listening on :{}", port);
+    warp::serve(routes(context)).run(([0, 0, 0, 0], port)).await;
+
+    Ok(())
+}
+
+fn routes(context: Arc<Mutex<Context>>) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let target_run = warp::path!("targets" / String / "run")
         .and(warp::post())
         .and(check_auth_filter(context.clone()))
@@ -327,13 +352,214 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .and(with_val(context.clone()))
         .and_then(handle_home);
 
-    info!("Listening on :{}", port);
-    let routes = target_run.or(list_targets).or(home);
-    warp::serve(routes).run(([0, 0, 0, 0], port)).await;
-
-    Ok(())
+    target_run.or(list_targets).or(home)
 }
 
 fn with_val<T: Clone + Send>(val: T) -> impl Filter<Extract = (T,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || val.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Once;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    const CONFIG: &str = "
+auths:
+  - !token
+      token: secret
+targets:
+  - name: a
+    chip: chip-a
+    probe: 1234:0001
+  - name: b
+    chip: chip-b
+    probe: 1234:0002
+";
+
+    /// Stands in for a board. The "ELF" is a script: `ok`, `fail` or `sleep:<ms>`.
+    #[derive(Default)]
+    struct FakeRunner {
+        /// Number of runs currently in progress, per chip.
+        running: Mutex<HashMap<String, usize>>,
+        /// Number of times a run started on a chip that was already running.
+        overlaps: AtomicUsize,
+        max_concurrent: AtomicUsize,
+        timeouts: Mutex<Vec<Duration>>,
+    }
+
+    impl FakeRunner {
+        fn is_running(&self, chip: &str) -> bool {
+            self.running.lock().get(chip).copied().unwrap_or(0) > 0
+        }
+
+        fn script(elf: &[u8]) -> anyhow::Result<()> {
+            match std::str::from_utf8(elf)? {
+                "ok" => info!("fake run ok"),
+                "fail" => bail!("fake failure"),
+                s => match s.strip_prefix("sleep:") {
+                    Some(ms) => std::thread::sleep(Duration::from_millis(ms.parse()?)),
+                    None => bail!("unknown fake script: {}", s),
+                },
+            }
+            Ok(())
+        }
+    }
+
+    impl Runner for FakeRunner {
+        fn run(&self, elf: &[u8], probe: &probe::Opts, timeout: Duration) -> anyhow::Result<()> {
+            self.timeouts.lock().push(timeout);
+            {
+                let mut running = self.running.lock();
+                let count = running.entry(probe.chip.clone()).or_default();
+                if *count > 0 {
+                    self.overlaps.fetch_add(1, Ordering::SeqCst);
+                }
+                *count += 1;
+                let total = running.values().sum();
+                self.max_concurrent.fetch_max(total, Ordering::SeqCst);
+            }
+
+            let res = Self::script(elf);
+
+            *self.running.lock().get_mut(&probe.chip).unwrap() -= 1;
+            res
+        }
+    }
+
+    fn setup() -> (Arc<FakeRunner>, Arc<Mutex<Context>>) {
+        static INIT: Once = Once::new();
+        INIT.call_once(crate::logutil::init_logger);
+
+        let fake = Arc::new(FakeRunner::default());
+        let cx = Arc::new(Mutex::new(Context {
+            oidc_client: None,
+            config: serde_yaml::from_str(CONFIG).unwrap(),
+            target_locks: HashMap::new(),
+            runner: fake.clone(),
+        }));
+        (fake, cx)
+    }
+
+    async fn post(cx: &Arc<Mutex<Context>>, path: &str, auth: Option<&str>, body: &str) -> (StatusCode, String) {
+        let mut req = warp::test::request().method("POST").path(path).body(body);
+        if let Some(auth) = auth {
+            req = req.header("Authorization", auth);
+        }
+        let res = req.reply(&routes(cx.clone())).await;
+        (res.status(), String::from_utf8_lossy(res.body()).into_owned())
+    }
+
+    async fn run(cx: &Arc<Mutex<Context>>, target: &str, body: &str) -> (StatusCode, String) {
+        post(cx, &format!("/targets/{}/run", target), Some("Bearer secret"), body).await
+    }
+
+    async fn wait_until(cond: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !cond() {
+            assert!(start.elapsed() < Duration::from_secs(5), "condition not reached");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn run_ok() {
+        let (_fake, cx) = setup();
+        let (status, logs) = run(&cx, "a", "ok").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(logs.contains("fake run ok"), "logs: {}", logs);
+    }
+
+    #[tokio::test]
+    async fn run_fail() {
+        let (_fake, cx) = setup();
+        let (status, logs) = run(&cx, "a", "fail").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(logs.contains("fake failure"), "logs: {}", logs);
+    }
+
+    #[tokio::test]
+    async fn unknown_target() {
+        let (fake, cx) = setup();
+        let (status, body) = run(&cx, "nope", "ok").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "Target not found: nope");
+        assert!(fake.timeouts.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bad_auth() {
+        let (fake, cx) = setup();
+        let (status, _) = post(&cx, "/targets/a/run", None, "ok").await;
+        assert!(!status.is_success(), "missing header: {}", status);
+        let (status, _) = post(&cx, "/targets/a/run", Some("secret"), "ok").await;
+        assert!(!status.is_success(), "no Bearer prefix: {}", status);
+        let (status, _) = post(&cx, "/targets/a/run", Some("Bearer wrong"), "ok").await;
+        assert!(!status.is_success(), "wrong token: {}", status);
+        assert!(fake.timeouts.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn timeout_default_and_clamp() {
+        let (fake, cx) = setup();
+        run(&cx, "a", "ok").await;
+        post(&cx, "/targets/a/run?timeout=5", Some("Bearer secret"), "ok").await;
+        post(&cx, "/targets/a/run?timeout=1000", Some("Bearer secret"), "ok").await;
+        assert_eq!(
+            *fake.timeouts.lock(),
+            [Duration::from_secs(10), Duration::from_secs(5), Duration::from_secs(60)]
+        );
+    }
+
+    #[tokio::test]
+    async fn same_target_is_serialized() {
+        let (fake, cx) = setup();
+        let (r1, r2) = tokio::join!(run(&cx, "a", "sleep:100"), run(&cx, "a", "sleep:100"));
+        assert_eq!((r1.0, r2.0), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(fake.overlaps.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn different_targets_run_concurrently() {
+        let (fake, cx) = setup();
+        let (r1, r2) = tokio::join!(run(&cx, "a", "sleep:200"), run(&cx, "b", "sleep:200"));
+        assert_eq!((r1.0, r2.0), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(fake.max_concurrent.load(Ordering::SeqCst), 2);
+    }
+
+    /// A client that disconnects mid-run must not free the target while the run is still going.
+    #[tokio::test]
+    #[ignore = "known bug: the target lock is released when the client disconnects, even though the run continues"]
+    async fn disconnect_keeps_target_locked() {
+        let (fake, cx) = setup();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(warp::serve(routes(cx.clone())).incoming(listener).run());
+
+        let body = "sleep:500";
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "POST /targets/a/run HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer secret\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        wait_until(|| fake.is_running("chip-a")).await;
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (status, _) = run(&cx, "a", "ok").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            fake.overlaps.load(Ordering::SeqCst),
+            0,
+            "second run started while the first was still running"
+        );
+    }
 }
