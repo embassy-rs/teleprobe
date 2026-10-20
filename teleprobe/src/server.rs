@@ -10,7 +10,7 @@ use log::{error, info};
 use parking_lot::Mutex;
 use probe_rs::probe::list::Lister;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio::task::spawn_blocking;
 use warp::http::StatusCode;
 use warp::reply::{html, with_status};
@@ -46,11 +46,15 @@ impl Runner for ProbeRunner {
 
 async fn run_with_log_capture(
     runner: Arc<dyn Runner>,
+    target_guard: OwnedMutexGuard<()>,
     elf: Bytes,
     probe: probe::Opts,
     timeout: Duration,
 ) -> (bool, Vec<u8>) {
     let (ok, entries) = spawn_blocking(move || {
+        // The guard lives in the blocking task, not in the request handler. If the client
+        // disconnects, the handler is dropped but the run continues, and must keep the target.
+        let _target_guard = target_guard;
         crate::logutil::with_capture(|| match runner.run(&elf, &probe, timeout) {
             Ok(()) => true,
             Err(e) => {
@@ -190,7 +194,7 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         .or_insert_with(|| Arc::new(AsyncMutex::new(())))
         .clone();
 
-    let _target_guard = target_mutex.lock().await;
+    let target_guard = target_mutex.lock_owned().await;
 
     let probe = probe::Opts {
         chip: target.chip.clone(),
@@ -210,7 +214,7 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         (timeout, context.runner.clone())
     };
 
-    let (ok, logs) = run_with_log_capture(runner, elf, probe, timeout).await;
+    let (ok, logs) = run_with_log_capture(runner, target_guard, elf, probe, timeout).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
 
     Ok(with_status(logs, status))
@@ -534,7 +538,6 @@ targets:
 
     /// A client that disconnects mid-run must not free the target while the run is still going.
     #[tokio::test]
-    #[ignore = "known bug: the target lock is released when the client disconnects, even though the run continues"]
     async fn disconnect_keeps_target_locked() {
         let (fake, cx) = setup();
 
