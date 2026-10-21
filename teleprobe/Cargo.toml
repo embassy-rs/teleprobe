@@ -40,6 +40,7 @@ openssl = { version = "0.10.76", optional = true }
 rustix = { version = "1.1.4", features = ["fs"] }
 
 [dev-dependencies]
+object = { version = "0.38.1", features = ["write"] }
 tokio = { version = "1", features = ["macros", "rt", "time", "net", "io-util"] }
 warp = { version = "0.4", default-features = false, features = ["server", "test"] }
 

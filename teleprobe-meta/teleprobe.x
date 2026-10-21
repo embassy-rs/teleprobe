@@ -8,4 +8,8 @@ SECTIONS
   {
     KEEP(*(.teleprobe.timeout));
   }
+  .teleprobe.group (INFO) :
+  {
+    KEEP(*(.teleprobe.group));
+  }
 }
