@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::fs;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::bail;
@@ -22,21 +23,28 @@ use crate::config::{Auth, Config, OidcAuthRule, Target};
 #[cfg(target_os = "linux")]
 use crate::probe::power_enable;
 use crate::scheduler::{Grant, Queue};
+use crate::util::ondrop::OnDrop;
 use crate::{api, probe, run};
 
 /// Runs firmware on a target. Abstracted so the server can be tested without hardware.
+/// A run must fail soon after `cancel` is set.
 trait Runner: Send + Sync {
-    fn run(&self, elf: &[u8], probe: &probe::Opts, timeout: Duration) -> anyhow::Result<()>;
+    fn run(&self, elf: &[u8], probe: &probe::Opts, timeout: Duration, cancel: Arc<AtomicBool>) -> anyhow::Result<()>;
 }
 
 struct ProbeRunner;
 
 impl Runner for ProbeRunner {
-    fn run(&self, elf: &[u8], probe: &probe::Opts, timeout: Duration) -> anyhow::Result<()> {
+    fn run(&self, elf: &[u8], probe: &probe::Opts, timeout: Duration, cancel: Arc<AtomicBool>) -> anyhow::Result<()> {
+        // Don't bother connecting and flashing if another member already failed.
+        if cancel.load(Ordering::Relaxed) {
+            bail!("Cancelled");
+        }
         let mut sess = probe::connect(probe)?;
 
         let opts = run::Options {
             deadline: Some(Instant::now() + timeout),
+            cancel: Some(cancel),
             ..Default::default()
         };
         run::run(&mut sess, elf, opts)?;
@@ -45,10 +53,11 @@ impl Runner for ProbeRunner {
     }
 }
 
-/// Runs one member, and returns why it failed, if it did, and its logs.
+/// Runs one member, and returns why it failed, if it did, and its logs. A failure cancels the rest of the group.
 async fn run_with_log_capture(
     runner: Arc<dyn Runner>,
     grant: Arc<Grant>,
+    cancel: Arc<AtomicBool>,
     elf: Vec<u8>,
     probe: probe::Opts,
     timeout: Duration,
@@ -59,8 +68,9 @@ async fn run_with_log_capture(
         // It's shared by all members, so the group's targets are freed when the last one finishes.
         let _grant = grant;
         crate::logutil::with_capture(|| {
-            runner.run(&elf, &probe, timeout).map_err(|e| {
+            runner.run(&elf, &probe, timeout, cancel.clone()).map_err(|e| {
                 error!("Run failed: {:?}", e);
+                cancel.store(true, Ordering::Relaxed);
                 format!("{:#}", e)
             })
         })
@@ -228,8 +238,23 @@ async fn handle_run(args: RunArgs, body: Bytes, cx: Arc<Mutex<Context>>) -> Resu
         .await;
     let grant = Arc::new(grant);
 
+    // If the client disconnects, this handler is dropped, and nobody is waiting for the result.
+    // Cancel the runs so the targets are freed early. After a normal finish, this does nothing.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = OnDrop::new({
+        let cancel = cancel.clone();
+        move || cancel.store(true, Ordering::Relaxed)
+    });
+
     let runs = members.into_iter().map(|(target, elf)| {
-        let run = run_with_log_capture(runner.clone(), grant.clone(), elf, probe_opts(&target), timeout);
+        let run = run_with_log_capture(
+            runner.clone(),
+            grant.clone(),
+            cancel.clone(),
+            elf,
+            probe_opts(&target),
+            timeout,
+        );
         async move {
             let (res, logs) = run.await;
             api::MemberResult {
@@ -413,7 +438,10 @@ targets:
     probe: 1234:0002
 ";
 
-    /// Stands in for a board. The "ELF" is a script: `ok`, `fail` or `sleep:<ms>`.
+    /// Like a real board, a cancelled run takes a while to stop, because the core is halted and its state dumped.
+    const HALT_TIME: Duration = Duration::from_millis(100);
+
+    /// Stands in for a board. The "ELF" is a script: `ok`, `fail` or `sleep:<ms>`. Sleeps can be cancelled.
     #[derive(Default)]
     struct FakeRunner {
         /// Number of runs currently in progress, per chip.
@@ -422,6 +450,7 @@ targets:
         overlaps: AtomicUsize,
         max_concurrent: AtomicUsize,
         timeouts: Mutex<Vec<Duration>>,
+        cancelled: AtomicUsize,
     }
 
     impl FakeRunner {
@@ -429,12 +458,22 @@ targets:
             self.running.lock().get(chip).copied().unwrap_or(0) > 0
         }
 
-        fn script(elf: &[u8]) -> anyhow::Result<()> {
+        fn script(&self, elf: &[u8], cancel: &AtomicBool) -> anyhow::Result<()> {
             match std::str::from_utf8(elf)? {
                 "ok" => info!("fake run ok"),
                 "fail" => bail!("fake failure"),
                 s => match s.strip_prefix("sleep:") {
-                    Some(ms) => std::thread::sleep(Duration::from_millis(ms.parse()?)),
+                    Some(ms) => {
+                        let end = Instant::now() + Duration::from_millis(ms.parse()?);
+                        while Instant::now() < end {
+                            if cancel.load(Ordering::Relaxed) {
+                                self.cancelled.fetch_add(1, Ordering::SeqCst);
+                                std::thread::sleep(HALT_TIME);
+                                bail!("Cancelled");
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
                     None => bail!("unknown fake script: {}", s),
                 },
             }
@@ -443,7 +482,13 @@ targets:
     }
 
     impl Runner for FakeRunner {
-        fn run(&self, elf: &[u8], probe: &probe::Opts, timeout: Duration) -> anyhow::Result<()> {
+        fn run(
+            &self,
+            elf: &[u8],
+            probe: &probe::Opts,
+            timeout: Duration,
+            cancel: Arc<AtomicBool>,
+        ) -> anyhow::Result<()> {
             self.timeouts.lock().push(timeout);
             {
                 let mut running = self.running.lock();
@@ -456,7 +501,7 @@ targets:
                 self.max_concurrent.fetch_max(total, Ordering::SeqCst);
             }
 
-            let res = Self::script(elf);
+            let res = self.script(elf, &cancel);
 
             *self.running.lock().get_mut(&probe.chip).unwrap() -= 1;
             res
@@ -605,7 +650,7 @@ targets:
         stream
     }
 
-    /// A client that disconnects mid-run must not free the target while the run is still going.
+    /// A client that disconnects mid-run must not free the target while the run is still stopping.
     #[tokio::test]
     async fn disconnect_keeps_target_locked() {
         let (fake, cx) = setup();
@@ -624,7 +669,7 @@ targets:
     }
 
     /// Same for a group: after a disconnect, a member that already finished keeps its target until the
-    /// rest of the group is done.
+    /// rest of the group has stopped.
     #[tokio::test]
     async fn disconnect_keeps_group_locked() {
         let (fake, cx) = setup();
@@ -721,5 +766,42 @@ targets:
         assert_eq!(status, StatusCode::OK);
         assert!(!fake.is_running("chip-b"), "a was free while b was still running");
         assert_eq!(grp.await.unwrap().0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn failure_cancels_group() {
+        let (fake, cx) = setup();
+        let start = Instant::now();
+        let (status, res) = run_group(&cx, &[("a", "fail"), ("b", "sleep:10000")]).await;
+        assert!(start.elapsed() < Duration::from_secs(2), "took {:?}", start.elapsed());
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let [a, b] = &res.members[..] else { panic!("{:?}", res) };
+        assert_eq!(a.reason.as_deref(), Some("fake failure"));
+        assert_eq!(b.reason.as_deref(), Some("Cancelled"));
+        assert_eq!(fake.cancelled.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_run() {
+        let (fake, cx) = setup();
+        let stream = start_run(&cx, &[("a", "sleep:10000")]).await;
+        wait_until(|| fake.is_running("chip-a")).await;
+        drop(stream);
+
+        wait_until(|| !fake.is_running("chip-a")).await;
+        assert_eq!(fake.cancelled.load(Ordering::SeqCst), 1);
+        let (status, _) = run(&cx, "a", "ok").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Only failures cancel. A member that passes early doesn't stop the others.
+    #[tokio::test]
+    async fn pass_does_not_cancel_group() {
+        let (fake, cx) = setup();
+        let (status, res) = run_group(&cx, &[("a", "ok"), ("b", "sleep:200")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(res.ok);
+        assert_eq!(fake.cancelled.load(Ordering::SeqCst), 0);
     }
 }
