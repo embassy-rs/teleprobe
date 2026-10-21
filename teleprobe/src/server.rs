@@ -10,7 +10,6 @@ use log::{error, info};
 use parking_lot::Mutex;
 use probe_rs::probe::list::Lister;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio::task::spawn_blocking;
 use warp::http::StatusCode;
 use warp::reply::{html, with_status};
@@ -21,6 +20,7 @@ use crate::auth::oidc::Client;
 use crate::config::{Auth, Config, OidcAuthRule};
 #[cfg(target_os = "linux")]
 use crate::probe::power_enable;
+use crate::scheduler::{Grant, Queue};
 use crate::{api, probe, run};
 
 /// Runs firmware on a target. Abstracted so the server can be tested without hardware.
@@ -46,15 +46,15 @@ impl Runner for ProbeRunner {
 
 async fn run_with_log_capture(
     runner: Arc<dyn Runner>,
-    target_guard: OwnedMutexGuard<()>,
+    grant: Grant,
     elf: Bytes,
     probe: probe::Opts,
     timeout: Duration,
 ) -> (bool, Vec<u8>) {
     let (ok, entries) = spawn_blocking(move || {
-        // The guard lives in the blocking task, not in the request handler. If the client
+        // The grant lives in the blocking task, not in the request handler. If the client
         // disconnects, the handler is dropped but the run continues, and must keep the target.
-        let _target_guard = target_guard;
+        let _grant = grant;
         crate::logutil::with_capture(|| match runner.run(&elf, &probe, timeout) {
             Ok(()) => true,
             Err(e) => {
@@ -187,14 +187,8 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         }
     };
 
-    let target_mutex = cx
-        .lock()
-        .target_locks
-        .entry(target.name.clone())
-        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-        .clone();
-
-    let target_guard = target_mutex.lock_owned().await;
+    let queue = cx.lock().queue.clone();
+    let grant = queue.acquire(vec![target.name.clone()]).await;
 
     let probe = probe::Opts {
         chip: target.chip.clone(),
@@ -214,7 +208,7 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         (timeout, context.runner.clone())
     };
 
-    let (ok, logs) = run_with_log_capture(runner, target_guard, elf, probe, timeout).await;
+    let (ok, logs) = run_with_log_capture(runner, grant, elf, probe, timeout).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
 
     Ok(with_status(logs, status))
@@ -301,7 +295,7 @@ async fn handle_home(cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
 struct Context {
     oidc_client: Option<oidc::Client>,
     config: Config,
-    target_locks: HashMap<String, Arc<AsyncMutex<()>>>,
+    queue: Arc<Queue>,
     runner: Arc<dyn Runner>,
 }
 
@@ -325,8 +319,8 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
 
     let context: Arc<Mutex<Context>> = Arc::new(Mutex::new(Context {
         oidc_client,
+        queue: Queue::new(Duration::from_secs(config.reserve_after_secs)),
         config,
-        target_locks: HashMap::new(),
         runner: Arc::new(ProbeRunner),
     }));
 
@@ -441,10 +435,11 @@ targets:
         INIT.call_once(crate::logutil::init_logger);
 
         let fake = Arc::new(FakeRunner::default());
+        let config: Config = serde_yaml::from_str(CONFIG).unwrap();
         let cx = Arc::new(Mutex::new(Context {
             oidc_client: None,
-            config: serde_yaml::from_str(CONFIG).unwrap(),
-            target_locks: HashMap::new(),
+            queue: Queue::new(Duration::from_secs(config.reserve_after_secs)),
+            config,
             runner: fake.clone(),
         }));
         (fake, cx)
