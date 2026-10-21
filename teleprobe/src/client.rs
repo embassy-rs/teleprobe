@@ -190,71 +190,105 @@ async fn run_job(
     Err(job)
 }
 
-/// How many times a job is sent when the HTTP request itself fails (DNS, connect, connection reset...),
+async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_output: bool) -> Result<(), ()> {
+    let req = api::RunRequest {
+        members: vec![api::RunMember {
+            target: job.target.clone(),
+            elf: job.elf.clone(),
+        }],
+    };
+
+    let label = format!("{} {}", job.target, job.path.display());
+    let res = match send_run(client, creds, &req, job.timeout, &label).await {
+        Ok(res) => res,
+        Err(e) => {
+            error!("=== {}: FAILED: {:#}", label, e);
+            return Err(());
+        }
+    };
+
+    for m in &res.members {
+        if m.ok {
+            info!("=== {} {}: OK", m.target, job.path.display());
+            if show_output {
+                info!("{}", m.logs);
+            }
+        } else {
+            let reason = m.reason.as_deref().unwrap_or("unknown");
+            error!("=== {} {}: FAILED: {}", m.target, job.path.display(), reason);
+            error!("{}", m.logs);
+        }
+    }
+
+    if res.ok { Ok(()) } else { Err(()) }
+}
+
+/// How many times a run request is sent when the HTTP request itself fails (DNS, connect, connection reset...),
 /// as opposed to the test failing. Independent of `--retries`.
 const CONNECTION_ATTEMPTS: u32 = 5;
 
-async fn send_job(client: &Client, creds: &Credentials, job: &Job) -> Result<(StatusCode, String), reqwest::Error> {
+async fn post_run(
+    client: &Client,
+    creds: &Credentials,
+    req: &api::RunRequest,
+    timeout: Option<u64>,
+) -> Result<(StatusCode, String), reqwest::Error> {
     let res = client
-        .post(format!("{}/targets/{}/run", creds.host, job.target))
-        .query(&RunArgs { timeout: job.timeout })
-        .body(job.elf.clone())
+        .post(format!("{}/targets/run", creds.host))
+        .query(&RunArgs { timeout })
+        .json(req)
         .bearer_auth(&creds.token)
         .send()
         .await?;
     let status = res.status();
-    let logs = res.text().await?;
-    Ok((status, logs))
+    let body = res.text().await?;
+    Ok((status, body))
 }
 
-async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_output: bool) -> Result<(), ()> {
+/// Sends a run request. Returns an error if the run didn't happen, for example because the request was invalid.
+/// `label` names the job in the retry warnings.
+async fn send_run(
+    client: &Client,
+    creds: &Credentials,
+    req: &api::RunRequest,
+    timeout: Option<u64>,
+    label: &str,
+) -> anyhow::Result<api::RunResponse> {
     let mut attempt = 1;
-    let res = loop {
-        match send_job(client, creds, job).await {
-            Ok(res) => break Ok(res),
+    let (status, body) = loop {
+        match post_run(client, creds, req, timeout).await {
+            Ok(res) => break res,
             Err(e) if attempt < CONNECTION_ATTEMPTS => {
                 let delay = Duration::from_secs(1 << (attempt - 1));
                 warn!(
-                    "=== {} {}: HTTP request failed, retrying in {}s: {:#}",
-                    job.target,
-                    job.path.display(),
+                    "=== {}: HTTP request failed, retrying in {}s: {:#}",
+                    label,
                     delay.as_secs(),
                     anyhow::Error::from(e)
                 );
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }
-            Err(e) => break Err(anyhow::Error::from(e).context("HTTP request failed")),
+            Err(e) => return Err(anyhow::Error::from(e).context("HTTP request failed")),
         }
     };
 
-    let (result, logs) = match res {
-        Ok((status, logs)) if status.is_success() => (Ok(()), logs),
-        Ok((status, logs)) => (
-            Err(anyhow::anyhow!(
-                "HTTP request failed with status code: {}: {}",
-                status.as_u16(),
-                status.canonical_reason().unwrap_or("unknown")
-            )),
-            logs,
-        ),
-        Err(e) => (Err(e), String::new()),
-    };
-
-    match result {
-        Ok(()) => {
-            info!("=== {} {}: OK", job.target, job.path.display());
-            if show_output {
-                info!("{}", logs);
+    // Runs answer 200 or 400 with a JSON body. Anything else, or a body that isn't JSON, is a request error.
+    if status == StatusCode::OK || status == StatusCode::BAD_REQUEST {
+        if let Ok(res) = serde_json::from_str::<api::RunResponse>(&body) {
+            if res.ok && status != StatusCode::OK {
+                bail!("server returned status {} for a passing run", status.as_u16());
             }
-            Ok(())
-        }
-        Err(e) => {
-            error!("=== {} {}: FAILED: {:#}", job.target, job.path.display(), e);
-            error!("{}", logs);
-            Err(())
+            return Ok(res);
         }
     }
+
+    bail!(
+        "HTTP request failed with status code: {}: {}: {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("unknown"),
+        body
+    )
 }
 
 fn load_cache(cache: Option<String>) -> Cache {

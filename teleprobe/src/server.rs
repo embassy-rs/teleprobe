@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::fs;
 use std::sync::Arc;
@@ -6,18 +6,19 @@ use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use bytes::Bytes;
+use futures::future::join_all;
 use log::{error, info};
 use parking_lot::Mutex;
 use probe_rs::probe::list::Lister;
 use serde::{Deserialize, Serialize};
 use tokio::task::spawn_blocking;
 use warp::http::StatusCode;
-use warp::reply::{html, with_status};
+use warp::reply::{Response, html, json, with_status};
 use warp::{Filter, Rejection, Reply};
 
 use crate::auth::oidc;
 use crate::auth::oidc::Client;
-use crate::config::{Auth, Config, OidcAuthRule};
+use crate::config::{Auth, Config, OidcAuthRule, Target};
 #[cfg(target_os = "linux")]
 use crate::probe::power_enable;
 use crate::scheduler::{Grant, Queue};
@@ -44,33 +45,34 @@ impl Runner for ProbeRunner {
     }
 }
 
+/// Runs one member, and returns why it failed, if it did, and its logs.
 async fn run_with_log_capture(
     runner: Arc<dyn Runner>,
-    grant: Grant,
-    elf: Bytes,
+    grant: Arc<Grant>,
+    elf: Vec<u8>,
     probe: probe::Opts,
     timeout: Duration,
-) -> (bool, Vec<u8>) {
-    let (ok, entries) = spawn_blocking(move || {
-        // The grant lives in the blocking task, not in the request handler. If the client
-        // disconnects, the handler is dropped but the run continues, and must keep the target.
+) -> (Result<(), String>, String) {
+    let (res, entries) = spawn_blocking(move || {
+        // The grant lives in the blocking tasks, not in the request handler. If the client
+        // disconnects, the handler is dropped but the runs continue, and must keep their targets.
+        // It's shared by all members, so the group's targets are freed when the last one finishes.
         let _grant = grant;
-        crate::logutil::with_capture(|| match runner.run(&elf, &probe, timeout) {
-            Ok(()) => true,
-            Err(e) => {
+        crate::logutil::with_capture(|| {
+            runner.run(&elf, &probe, timeout).map_err(|e| {
                 error!("Run failed: {:?}", e);
-                false
-            }
+                format!("{:#}", e)
+            })
         })
     })
     .await
     .unwrap();
 
-    let mut res = String::new();
+    let mut logs = String::new();
     for entry in entries {
-        writeln!(&mut res, "{} - {}", entry.level, entry.message).unwrap();
+        writeln!(&mut logs, "{} - {}", entry.level, entry.message).unwrap();
     }
-    (ok, res.into_bytes())
+    (res, logs)
 }
 
 macro_rules! reject {
@@ -78,7 +80,8 @@ macro_rules! reject {
         return Ok(with_status(
             format!($($x)*).as_bytes().to_vec(),
             StatusCode::$code,
-        ))
+        )
+        .into_response())
     };
     ($($x:tt)*) => {
         reject!(StatusCode::BAD_REQUEST, $($x)*)
@@ -178,19 +181,8 @@ struct RunArgs {
     timeout: Option<u64>,
 }
 
-async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Context>>) -> Result<impl Reply, Rejection> {
-    let target = {
-        let context = cx.lock();
-        match context.config.targets.iter().find(|t| t.name == name) {
-            Some(x) => x.clone(),
-            None => reject!(StatusCode::NOT_FOUND, "Target not found: {}", name),
-        }
-    };
-
-    let queue = cx.lock().queue.clone();
-    let grant = queue.acquire(vec![target.name.clone()]).await;
-
-    let probe = probe::Opts {
+fn probe_opts(target: &Target) -> probe::Opts {
+    probe::Opts {
         chip: target.chip.clone(),
         connect_under_reset: target.connect_under_reset,
         probe: Some(target.probe.clone()),
@@ -199,19 +191,60 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         cycle_delay_seconds: target.cycle_delay_seconds,
         max_settle_time_millis: target.max_settle_time_millis,
         protocol: None,
-    };
+    }
+}
 
-    let (timeout, runner) = {
+async fn handle_run(args: RunArgs, body: Bytes, cx: Arc<Mutex<Context>>) -> Result<Response, Rejection> {
+    let req: api::RunRequest = match serde_json::from_slice(&body) {
+        Ok(x) => x,
+        Err(e) => reject!("Invalid request: {}", e),
+    };
+    if req.members.is_empty() {
+        reject!("Request has no members");
+    }
+
+    let (members, timeout, queue, runner) = {
         let context = cx.lock();
         let config = &context.config;
+
+        let mut seen = HashSet::new();
+        let mut members = Vec::new();
+        for m in req.members {
+            if !seen.insert(m.target.clone()) {
+                reject!("Duplicate target: {}", m.target);
+            }
+            match config.targets.iter().find(|t| t.name == m.target) {
+                Some(target) => members.push((target.clone(), m.elf)),
+                None => reject!(StatusCode::NOT_FOUND, "Target not found: {}", m.target),
+            }
+        }
+
         let timeout = Duration::from_secs(args.timeout.unwrap_or(config.default_timeout).min(config.max_timeout));
-        (timeout, context.runner.clone())
+        (members, timeout, context.queue.clone(), context.runner.clone())
     };
 
-    let (ok, logs) = run_with_log_capture(runner, grant, elf, probe, timeout).await;
-    let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+    let grant = queue
+        .acquire(members.iter().map(|(t, _)| t.name.clone()).collect())
+        .await;
+    let grant = Arc::new(grant);
 
-    Ok(with_status(logs, status))
+    let runs = members.into_iter().map(|(target, elf)| {
+        let run = run_with_log_capture(runner.clone(), grant.clone(), elf, probe_opts(&target), timeout);
+        async move {
+            let (res, logs) = run.await;
+            api::MemberResult {
+                target: target.name,
+                ok: res.is_ok(),
+                reason: res.err(),
+                logs,
+            }
+        }
+    });
+    let members = join_all(runs).await;
+
+    let ok = members.iter().all(|m| m.ok);
+    let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+    Ok(with_status(json(&api::RunResponse { ok, members }), status).into_response())
 }
 
 fn targets(cx: Arc<Mutex<Context>>) -> api::TargetList {
@@ -331,7 +364,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
 }
 
 fn routes(context: Arc<Mutex<Context>>) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
-    let target_run = warp::path!("targets" / String / "run")
+    let target_run = warp::path!("targets" / "run")
         .and(warp::post())
         .and(check_auth_filter(context.clone()))
         .and(warp::query())
@@ -454,8 +487,30 @@ targets:
         (res.status(), String::from_utf8_lossy(res.body()).into_owned())
     }
 
-    async fn run(cx: &Arc<Mutex<Context>>, target: &str, body: &str) -> (StatusCode, String) {
-        post(cx, &format!("/targets/{}/run", target), Some("Bearer secret"), body).await
+    /// Request body for a group, from `(target, script)` pairs.
+    fn group(members: &[(&str, &str)]) -> String {
+        serde_json::to_string(&api::RunRequest {
+            members: members
+                .iter()
+                .map(|(target, script)| api::RunMember {
+                    target: target.to_string(),
+                    elf: script.as_bytes().to_vec(),
+                })
+                .collect(),
+        })
+        .unwrap()
+    }
+
+    async fn run_group(cx: &Arc<Mutex<Context>>, members: &[(&str, &str)]) -> (StatusCode, api::RunResponse) {
+        let (status, body) = post(cx, "/targets/run", Some("Bearer secret"), &group(members)).await;
+        let res = serde_json::from_str(&body).unwrap_or_else(|e| panic!("{}: {}", e, body));
+        (status, res)
+    }
+
+    /// Runs a group of one, and returns its status and logs.
+    async fn run(cx: &Arc<Mutex<Context>>, target: &str, script: &str) -> (StatusCode, String) {
+        let (status, mut res) = run_group(cx, &[(target, script)]).await;
+        (status, res.members.remove(0).logs)
     }
 
     async fn wait_until(cond: impl Fn() -> bool) {
@@ -485,7 +540,7 @@ targets:
     #[tokio::test]
     async fn unknown_target() {
         let (fake, cx) = setup();
-        let (status, body) = run(&cx, "nope", "ok").await;
+        let (status, body) = post(&cx, "/targets/run", Some("Bearer secret"), &group(&[("nope", "ok")])).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body, "Target not found: nope");
         assert!(fake.timeouts.lock().is_empty());
@@ -494,11 +549,12 @@ targets:
     #[tokio::test]
     async fn bad_auth() {
         let (fake, cx) = setup();
-        let (status, _) = post(&cx, "/targets/a/run", None, "ok").await;
+        let body = group(&[("a", "ok")]);
+        let (status, _) = post(&cx, "/targets/run", None, &body).await;
         assert!(!status.is_success(), "missing header: {}", status);
-        let (status, _) = post(&cx, "/targets/a/run", Some("secret"), "ok").await;
+        let (status, _) = post(&cx, "/targets/run", Some("secret"), &body).await;
         assert!(!status.is_success(), "no Bearer prefix: {}", status);
-        let (status, _) = post(&cx, "/targets/a/run", Some("Bearer wrong"), "ok").await;
+        let (status, _) = post(&cx, "/targets/run", Some("Bearer wrong"), &body).await;
         assert!(!status.is_success(), "wrong token: {}", status);
         assert!(fake.timeouts.lock().is_empty());
     }
@@ -507,8 +563,9 @@ targets:
     async fn timeout_default_and_clamp() {
         let (fake, cx) = setup();
         run(&cx, "a", "ok").await;
-        post(&cx, "/targets/a/run?timeout=5", Some("Bearer secret"), "ok").await;
-        post(&cx, "/targets/a/run?timeout=1000", Some("Bearer secret"), "ok").await;
+        let body = group(&[("a", "ok")]);
+        post(&cx, "/targets/run?timeout=5", Some("Bearer secret"), &body).await;
+        post(&cx, "/targets/run?timeout=1000", Some("Bearer secret"), &body).await;
         assert_eq!(
             *fake.timeouts.lock(),
             [Duration::from_secs(10), Duration::from_secs(5), Duration::from_secs(60)]
@@ -531,23 +588,28 @@ targets:
         assert_eq!(fake.max_concurrent.load(Ordering::SeqCst), 2);
     }
 
-    /// A client that disconnects mid-run must not free the target while the run is still going.
-    #[tokio::test]
-    async fn disconnect_keeps_target_locked() {
-        let (fake, cx) = setup();
-
+    /// Sends a run request over a real connection, and returns the connection so the test can drop it.
+    async fn start_run(cx: &Arc<Mutex<Context>>, members: &[(&str, &str)]) -> TcpStream {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(warp::serve(routes(cx.clone())).incoming(listener).run());
 
-        let body = "sleep:500";
+        let body = group(members);
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let req = format!(
-            "POST /targets/a/run HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer secret\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /targets/run HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer secret\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body
         );
         stream.write_all(req.as_bytes()).await.unwrap();
+        stream
+    }
+
+    /// A client that disconnects mid-run must not free the target while the run is still going.
+    #[tokio::test]
+    async fn disconnect_keeps_target_locked() {
+        let (fake, cx) = setup();
+        let stream = start_run(&cx, &[("a", "sleep:500")]).await;
         wait_until(|| fake.is_running("chip-a")).await;
         drop(stream);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -559,5 +621,105 @@ targets:
             0,
             "second run started while the first was still running"
         );
+    }
+
+    /// Same for a group: after a disconnect, a member that already finished keeps its target until the
+    /// rest of the group is done.
+    #[tokio::test]
+    async fn disconnect_keeps_group_locked() {
+        let (fake, cx) = setup();
+        let stream = start_run(&cx, &[("a", "ok"), ("b", "sleep:500")]).await;
+        wait_until(|| fake.is_running("chip-b")).await;
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (status, _) = run(&cx, "a", "ok").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!fake.is_running("chip-b"), "a was free while b was still running");
+    }
+
+    #[tokio::test]
+    async fn group_members_run_concurrently() {
+        let (fake, cx) = setup();
+        let (status, res) = run_group(&cx, &[("a", "sleep:200"), ("b", "sleep:200")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(res.ok);
+        assert_eq!(fake.max_concurrent.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn group_fails_if_any_member_fails() {
+        let (_fake, cx) = setup();
+        let (status, res) = run_group(&cx, &[("a", "ok"), ("b", "fail")]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!res.ok);
+
+        let [a, b] = &res.members[..] else { panic!("{:?}", res) };
+        assert_eq!((a.target.as_str(), a.ok, a.reason.as_deref()), ("a", true, None));
+        assert_eq!(
+            (b.target.as_str(), b.ok, b.reason.as_deref()),
+            ("b", false, Some("fake failure"))
+        );
+        // Each member gets only its own logs.
+        assert!(
+            a.logs.contains("fake run ok") && !a.logs.contains("fake failure"),
+            "{}",
+            a.logs
+        );
+        assert!(
+            b.logs.contains("fake failure") && !b.logs.contains("fake run ok"),
+            "{}",
+            b.logs
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_groups_are_rejected() {
+        let (fake, cx) = setup();
+        let post = |body: String| {
+            let cx = cx.clone();
+            async move { post(&cx, "/targets/run", Some("Bearer secret"), &body).await }
+        };
+
+        let (status, body) = post(group(&[])).await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::BAD_REQUEST, "Request has no members")
+        );
+
+        let (status, body) = post(group(&[("a", "ok"), ("a", "ok")])).await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::BAD_REQUEST, "Duplicate target: a")
+        );
+
+        let (status, body) = post(r#"{"members":[{"target":"a","elf":"not base64!"}]}"#.to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.starts_with("Invalid request:"), "{}", body);
+
+        // One unknown member rejects the whole group, and nothing runs.
+        let (status, body) = post(group(&[("a", "ok"), ("nope", "ok")])).await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::NOT_FOUND, "Target not found: nope")
+        );
+
+        assert!(fake.timeouts.lock().is_empty());
+    }
+
+    /// A member that finishes early keeps its target until the whole group is done.
+    #[tokio::test]
+    async fn group_holds_targets_until_last_member_finishes() {
+        let (fake, cx) = setup();
+        let grp = tokio::spawn({
+            let cx = cx.clone();
+            async move { run_group(&cx, &[("a", "ok"), ("b", "sleep:300")]).await }
+        });
+        wait_until(|| fake.is_running("chip-b")).await;
+
+        let (status, _) = run(&cx, "a", "ok").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!fake.is_running("chip-b"), "a was free while b was still running");
+        assert_eq!(grp.await.unwrap().0, StatusCode::OK);
     }
 }
