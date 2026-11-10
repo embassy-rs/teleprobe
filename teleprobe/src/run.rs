@@ -196,17 +196,14 @@ impl Runner {
         {
             let mut core = sess.core(0)?;
 
-            if run_from_ram {
-                // On STM32H7 due to RAM ECC (I think?) it's possible that the
-                // last written word doesn't "stick" on reset because it's "half written"
-                // https://www.st.com/resource/en/application_note/dm00623136-error-correction-code-ecc-management-for-internal-memories-protection-on-stm32h7-series-stmicroelectronics.pdf
-                //
-                // Do one dummy write to ensure the last word sticks.
-                let data = core.read_word_32(vector_table.location as _)?;
-                core.write_word_32(vector_table.location as _, data)?;
-            }
-
-            if !skip_reset {
+            // When running from RAM the image was loaded into a core that was already reset and
+            // halted, and nothing has run since, so a second reset only does harm: on STM32
+            // parts with ECC SRAM the last word written to each bank is still in the bank's
+            // read-modify-write buffer and is lost by the reset, and on the STM32U5 a system
+            // reset erases SRAM2 unless an option byte says otherwise. Both corrupt whatever
+            // part of the image landed there.
+            let loaded_into_ram = run_from_ram && opts.do_flash;
+            if !skip_reset && !loaded_into_ram {
                 core.reset_and_halt(TIMEOUT)?;
             }
 

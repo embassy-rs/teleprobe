@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use anyhow::{Result, bail};
 use clap::Parser;
-use probe_rs::config::Registry;
+use probe_rs::config::{MemoryRegion, Registry};
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::{DebugProbeSelector, Probe, WireProtocol};
 use probe_rs::{MemoryInterface, Permissions, Session};
@@ -145,7 +145,24 @@ pub fn connect(opts: &Opts) -> Result<Session> {
 
     let perms = Permissions::new().allow_erase_all();
 
-    let target = registry.get_target_by_name(&opts.chip)?;
+    let mut target = registry.get_target_by_name(&opts.chip)?;
+
+    // On multi-core chips, RAM regions are typically listed as belonging to every core. When
+    // loading an image whose vector table is in RAM, probe-rs's flash loader then does
+    // `reset_and_halt` on *each* of those cores, after we already reset+halted the main core.
+    // On the STM32H745/H755 the secondary core's SYSRESETREQ is a chip-wide system reset that
+    // restarts the main core without its vector catch taking effect, so it runs whatever is in
+    // flash (or locks up on an erased flash) until the loader halts it again before writing RAM.
+    // The image then starts with stale NVIC/peripheral state, or inside the HardFault handler
+    // with all interrupts masked.
+    //
+    // We only ever run images on the main core, so restrict RAM regions to it.
+    let main_core = target.cores[0].name.clone();
+    for region in &mut target.memory_map {
+        if let MemoryRegion::Ram(ram) = region {
+            ram.cores.retain(|c| *c == main_core);
+        }
+    }
 
     let sess = if opts.connect_under_reset {
         probe.attach_under_reset(target, perms)?
