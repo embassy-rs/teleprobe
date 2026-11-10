@@ -336,7 +336,7 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
     info!("Running {} jobs across {} targets...", job_count, jobs_by_target.len());
 
     for job in &skipped_jobs {
-        info!("=== {} {}: SKIPPED", job.target, job.path.display());
+        info!("=== {} {}: OK (cached)", job.target, job.path.display());
     }
 
     let client = reqwest::Client::new();
