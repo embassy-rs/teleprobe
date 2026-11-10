@@ -2,13 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::ops::Add;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use blake3::Hasher;
 use futures::{StreamExt, stream};
 use log::{error, info, warn};
 use object::{Object, ObjectSection};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -189,31 +190,55 @@ async fn run_job(
     Err(job)
 }
 
-async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_output: bool) -> Result<(), ()> {
+/// How many times a job is sent when the HTTP request itself fails (DNS, connect, connection reset...),
+/// as opposed to the test failing. Independent of `--retries`.
+const CONNECTION_ATTEMPTS: u32 = 5;
+
+async fn send_job(client: &Client, creds: &Credentials, job: &Job) -> Result<(StatusCode, String), reqwest::Error> {
     let res = client
         .post(format!("{}/targets/{}/run", creds.host, job.target))
         .query(&RunArgs { timeout: job.timeout })
         .body(job.elf.clone())
         .bearer_auth(&creds.token)
         .send()
-        .await;
+        .await?;
+    let status = res.status();
+    let logs = res.text().await?;
+    Ok((status, logs))
+}
 
-    let mut logs = String::new();
-    let result = match res.context("HTTP request failed") {
-        Ok(res) => {
-            let status = res.status();
-            logs = res.text().await.unwrap_or_else(|_| "empty".to_string());
-            if status.is_success() {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!(
-                    "HTTP request failed with status code: {}: {}",
-                    status.as_u16(),
-                    status.canonical_reason().unwrap_or("unknown")
-                ))
+async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_output: bool) -> Result<(), ()> {
+    let mut attempt = 1;
+    let res = loop {
+        match send_job(client, creds, job).await {
+            Ok(res) => break Ok(res),
+            Err(e) if attempt < CONNECTION_ATTEMPTS => {
+                let delay = Duration::from_secs(1 << (attempt - 1));
+                warn!(
+                    "=== {} {}: HTTP request failed, retrying in {}s: {:#}",
+                    job.target,
+                    job.path.display(),
+                    delay.as_secs(),
+                    anyhow::Error::from(e)
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
             }
+            Err(e) => break Err(anyhow::Error::from(e).context("HTTP request failed")),
         }
-        Err(e) => Err(e),
+    };
+
+    let (result, logs) = match res {
+        Ok((status, logs)) if status.is_success() => (Ok(()), logs),
+        Ok((status, logs)) => (
+            Err(anyhow::anyhow!(
+                "HTTP request failed with status code: {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("unknown")
+            )),
+            logs,
+        ),
+        Err(e) => (Err(e), String::new()),
     };
 
     match result {
@@ -225,7 +250,7 @@ async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_out
             Ok(())
         }
         Err(e) => {
-            error!("=== {} {}: FAILED: {}", job.target, job.path.display(), e);
+            error!("=== {} {}: FAILED: {:#}", job.target, job.path.display(), e);
             error!("{}", logs);
             Err(())
         }
