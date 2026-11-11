@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fmt::Write;
 use std::io::Cursor;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
@@ -36,6 +38,8 @@ pub struct Options {
     /// This is OR-ed with a chip-name auto-detect inside `run`, so RP23xx
     /// always skips regardless of this flag.
     pub skip_reset: bool,
+    /// When set, the run halts the core and fails at the next poll.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for Options {
@@ -44,6 +48,7 @@ impl Default for Options {
             do_flash: true,
             deadline: None,
             skip_reset: false,
+            cancel: None,
         }
     }
 }
@@ -388,6 +393,15 @@ impl Runner {
                 let mut core = sess.core(0)?;
                 self.dump_state(&mut core, true)?;
                 bail!("Deadline exceeded")
+            }
+
+            if let Some(cancel) = &self.opts.cancel
+                && cancel.load(Ordering::Relaxed)
+            {
+                warn!("Run cancelled!");
+                let mut core = sess.core(0)?;
+                self.dump_state(&mut core, true)?;
+                bail!("Cancelled")
             }
 
             self.poll(sess)?;

@@ -5,6 +5,7 @@ pub mod config;
 pub mod logutil;
 pub mod probe;
 pub mod run;
+pub mod scheduler;
 pub mod server;
 pub mod util;
 

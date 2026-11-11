@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::ops::Add;
 use std::path::PathBuf;
@@ -103,12 +104,14 @@ impl Cache {
 struct ElfMetadata {
     target: Option<String>,
     timeout: Option<u64>,
+    group: Option<String>,
 }
 
 impl ElfMetadata {
     fn from_elf(elf: &[u8]) -> anyhow::Result<(Self, Hasher)> {
         let mut target = None;
         let mut timeout = None;
+        let mut group = None;
 
         let obj_file = object::File::parse(elf)?;
 
@@ -128,6 +131,16 @@ impl ElfMetadata {
                 timeout = Some(u32::from_le_bytes(data.try_into().unwrap()) as u64)
             } else {
                 warn!(".teleprobe.timeout contents are not a valid u32.")
+            }
+        }
+
+        if let Some(section) = obj_file.section_by_name(".teleprobe.group") {
+            let data = section.data()?;
+            if !data.is_empty() {
+                match String::from_utf8(data.to_vec()) {
+                    Ok(s) => group = Some(s),
+                    Err(_) => warn!(".teleprobe.group contents are not a valid utf8 string."),
+                }
             }
         }
 
@@ -155,16 +168,143 @@ impl ElfMetadata {
                 .update(&section_address.to_le_bytes());
         }
 
-        Ok((Self { target, timeout }, hasher))
+        Ok((Self { target, timeout, group }, hasher))
     }
 }
 
-struct Job {
+struct Member {
     path: PathBuf,
     target: String,
     elf: Vec<u8>,
     hash: String,
+}
+
+/// One run request: a single ELF, or all the ELFs of a group.
+struct Job {
+    group: Option<String>,
+    members: Vec<Member>,
+    /// Cache key. For a single ELF it's the ELF's hash, for a group it covers all members.
+    hash: String,
     timeout: Option<u64>,
+}
+
+impl Job {
+    fn log_name(&self, m: &Member) -> String {
+        match &self.group {
+            Some(group) => format!("{} {} (group {})", m.target, m.path.display(), group),
+            None => format!("{} {}", m.target, m.path.display()),
+        }
+    }
+
+    /// Sorted, so jobs on the same targets get the same key.
+    fn targets(&self) -> Vec<String> {
+        let targets: BTreeSet<_> = self.members.iter().map(|m| m.target.clone()).collect();
+        targets.into_iter().collect()
+    }
+}
+
+/// Turns ELFs into jobs. ELFs with the same group become one job, the others get one job each.
+fn plan_jobs(
+    files: Vec<(PathBuf, Vec<u8>)>,
+    target_override: Option<&str>,
+    timeout_override: Option<u64>,
+) -> anyhow::Result<Vec<Job>> {
+    let mut jobs: Vec<Job> = Vec::new();
+    let mut groups: HashMap<String, usize> = HashMap::new();
+
+    for (path, elf) in files {
+        let (meta, mut hasher) = ElfMetadata::from_elf(&elf).with_context(|| format!("{}", path.display()))?;
+
+        let target = target_override.map(str::to_string).or(meta.target).with_context(|| {
+            format!(
+                "{}: You have to either set --target, or embed it in the ELF using the `teleprobe-meta` crate.",
+                path.display()
+            )
+        })?;
+
+        hasher
+            .update(target.as_bytes())
+            .update(&meta.timeout.unwrap_or_default().to_le_bytes());
+        let hash = hasher.finalize().to_string();
+
+        let member = Member {
+            path,
+            target,
+            elf,
+            hash,
+        };
+        let new_job = |group| Job {
+            group,
+            members: Vec::new(),
+            hash: String::new(),
+            timeout: None,
+        };
+        let job = match meta.group {
+            None => {
+                jobs.push(new_job(None));
+                jobs.last_mut().unwrap()
+            }
+            Some(group) => match groups.entry(group) {
+                Entry::Occupied(e) => &mut jobs[*e.get()],
+                Entry::Vacant(e) => {
+                    jobs.push(new_job(Some(e.key().clone())));
+                    e.insert(jobs.len() - 1);
+                    jobs.last_mut().unwrap()
+                }
+            },
+        };
+        // The group gets the longest timeout of its members.
+        job.timeout = job.timeout.max(meta.timeout);
+        job.members.push(member);
+    }
+
+    for job in &mut jobs {
+        if let Some(group) = &job.group {
+            let mut seen: HashMap<&str, &PathBuf> = HashMap::new();
+            for m in &job.members {
+                if let Some(other) = seen.insert(&m.target, &m.path) {
+                    bail!(
+                        "Group {} has more than one ELF for target {}: {} and {}{}",
+                        group,
+                        m.target,
+                        other.display(),
+                        m.path.display(),
+                        if target_override.is_some() {
+                            ". Note that --target sets the target of every ELF."
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+            if job.members.len() == 1 {
+                warn!(
+                    "Group {} has only one ELF: {}. Is the rest of the group missing?",
+                    group,
+                    job.members[0].path.display()
+                );
+            }
+        }
+
+        job.hash = match (&job.group, &job.members[..]) {
+            (None, [m]) => m.hash.clone(),
+            _ => {
+                let mut hashes: Vec<&str> = job.members.iter().map(|m| m.hash.as_str()).collect();
+                hashes.sort();
+                let mut hasher = Hasher::new();
+                for h in hashes {
+                    hasher.update(h.as_bytes());
+                }
+                hasher.finalize().to_string()
+            }
+        };
+
+        if timeout_override.is_some() {
+            job.timeout = timeout_override;
+        }
+    }
+
+    Ok(jobs)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -190,71 +330,123 @@ async fn run_job(
     Err(job)
 }
 
-/// How many times a job is sent when the HTTP request itself fails (DNS, connect, connection reset...),
+async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_output: bool) -> Result<(), ()> {
+    let req = api::RunRequest {
+        members: job
+            .members
+            .iter()
+            .map(|m| api::RunMember {
+                target: m.target.clone(),
+                elf: m.elf.clone(),
+            })
+            .collect(),
+    };
+
+    // Names the job in the retry warnings: the group, or the single ELF.
+    let label = match &job.group {
+        Some(group) => format!("group {}", group),
+        None => job.log_name(&job.members[0]),
+    };
+    let res = match send_run(client, creds, &req, job.timeout, &label).await {
+        Ok(res) => res,
+        Err(e) => {
+            for m in &job.members {
+                error!("=== {}: FAILED: {:#}", job.log_name(m), e);
+            }
+            return Err(());
+        }
+    };
+
+    // The server answers in request order.
+    for (m, r) in job.members.iter().zip(&res.members) {
+        if r.ok {
+            info!("=== {}: OK", job.log_name(m));
+            if show_output {
+                info!("{}", r.logs);
+            }
+        } else {
+            let reason = r.reason.as_deref().unwrap_or("unknown");
+            error!("=== {}: FAILED: {}", job.log_name(m), reason);
+            error!("{}", r.logs);
+        }
+    }
+
+    if res.ok { Ok(()) } else { Err(()) }
+}
+
+/// How many times a run request is sent when the HTTP request itself fails (DNS, connect, connection reset...),
 /// as opposed to the test failing. Independent of `--retries`.
 const CONNECTION_ATTEMPTS: u32 = 5;
 
-async fn send_job(client: &Client, creds: &Credentials, job: &Job) -> Result<(StatusCode, String), reqwest::Error> {
+async fn post_run(
+    client: &Client,
+    creds: &Credentials,
+    req: &api::RunRequest,
+    timeout: Option<u64>,
+) -> Result<(StatusCode, String), reqwest::Error> {
     let res = client
-        .post(format!("{}/targets/{}/run", creds.host, job.target))
-        .query(&RunArgs { timeout: job.timeout })
-        .body(job.elf.clone())
+        .post(format!("{}/targets/run", creds.host))
+        .query(&RunArgs { timeout })
+        .json(req)
         .bearer_auth(&creds.token)
         .send()
         .await?;
     let status = res.status();
-    let logs = res.text().await?;
-    Ok((status, logs))
+    let body = res.text().await?;
+    Ok((status, body))
 }
 
-async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_output: bool) -> Result<(), ()> {
+/// Sends a run request. Returns an error if the run didn't happen, for example because the request was invalid.
+/// `label` names the job in the retry warnings.
+async fn send_run(
+    client: &Client,
+    creds: &Credentials,
+    req: &api::RunRequest,
+    timeout: Option<u64>,
+    label: &str,
+) -> anyhow::Result<api::RunResponse> {
     let mut attempt = 1;
-    let res = loop {
-        match send_job(client, creds, job).await {
-            Ok(res) => break Ok(res),
+    let (status, body) = loop {
+        match post_run(client, creds, req, timeout).await {
+            Ok(res) => break res,
             Err(e) if attempt < CONNECTION_ATTEMPTS => {
                 let delay = Duration::from_secs(1 << (attempt - 1));
                 warn!(
-                    "=== {} {}: HTTP request failed, retrying in {}s: {:#}",
-                    job.target,
-                    job.path.display(),
+                    "=== {}: HTTP request failed, retrying in {}s: {:#}",
+                    label,
                     delay.as_secs(),
                     anyhow::Error::from(e)
                 );
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }
-            Err(e) => break Err(anyhow::Error::from(e).context("HTTP request failed")),
+            Err(e) => return Err(anyhow::Error::from(e).context("HTTP request failed")),
         }
     };
 
-    let (result, logs) = match res {
-        Ok((status, logs)) if status.is_success() => (Ok(()), logs),
-        Ok((status, logs)) => (
-            Err(anyhow::anyhow!(
-                "HTTP request failed with status code: {}: {}",
-                status.as_u16(),
-                status.canonical_reason().unwrap_or("unknown")
-            )),
-            logs,
-        ),
-        Err(e) => (Err(e), String::new()),
-    };
-
-    match result {
-        Ok(()) => {
-            info!("=== {} {}: OK", job.target, job.path.display());
-            if show_output {
-                info!("{}", logs);
+    // Runs answer 200 or 400 with a JSON body. Anything else, or a body that isn't JSON, is a request error.
+    if status == StatusCode::OK || status == StatusCode::BAD_REQUEST {
+        if let Ok(res) = serde_json::from_str::<api::RunResponse>(&body) {
+            if res.ok && status != StatusCode::OK {
+                bail!("server returned status {} for a passing run", status.as_u16());
             }
-            Ok(())
-        }
-        Err(e) => {
-            error!("=== {} {}: FAILED: {:#}", job.target, job.path.display(), e);
-            error!("{}", logs);
-            Err(())
+            if res.members.len() != req.members.len() {
+                bail!(
+                    "server returned {} results for {} members",
+                    res.members.len(),
+                    req.members.len()
+                );
+            }
+            return Ok(res);
         }
     }
+
+    bail!(
+        "HTTP request failed with status code: {}: {}: {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("unknown"),
+        body
+    )
 }
 
 fn load_cache(cache: Option<String>) -> Cache {
@@ -292,56 +484,40 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
         cmd.files.iter().map(|f| f.into()).collect()
     };
 
+    let files = files
+        .into_iter()
+        .map(|path| {
+            let elf = std::fs::read(&path).with_context(|| format!("{}", path.display()))?;
+            Ok((path, elf))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    let jobs = plan_jobs(files, cmd.target.as_deref(), cmd.timeout)?;
+
     let cache = load_cache(cmd.cache.clone());
-    let job_count = files.len();
-    let mut jobs_by_target: HashMap<String, Vec<Job>> = HashMap::new();
+    let job_count = jobs.len();
+    // Keyed by the job's targets, so at most 2 requests are in flight per set of targets.
+    let mut jobs_by_targets: HashMap<Vec<String>, Vec<Job>> = HashMap::new();
     let mut skipped_jobs: Vec<Job> = Vec::new();
-
-    for path in files {
-        let elf: Vec<u8> = std::fs::read(&path)?;
-        let (meta, mut hasher) = ElfMetadata::from_elf(&elf)?;
-
-        let target = cmd
-            .target
-            .clone()
-            .or(meta.target)
-            .context("You have to either set --target, or embed it in the ELF using the `teleprobe-meta` crate.")?;
-
-        hasher
-            .update(target.as_bytes())
-            .update(&meta.timeout.unwrap_or_default().to_le_bytes());
-
-        let hash = hasher.finalize().to_string();
-        // Override timeout if requested
-        let timeout = match cmd.timeout {
-            Some(_) => cmd.timeout,
-            None => meta.timeout,
-        };
-
-        let jobs = if cache.contains(&hash) {
-            &mut skipped_jobs
+    for job in jobs {
+        if cache.contains(&job.hash) {
+            skipped_jobs.push(job);
         } else {
-            jobs_by_target.entry(target.clone()).or_default()
-        };
-
-        jobs.push(Job {
-            path,
-            target,
-            elf,
-            hash,
-            timeout,
-        });
+            jobs_by_targets.entry(job.targets()).or_default().push(job);
+        }
     }
 
-    info!("Running {} jobs across {} targets...", job_count, jobs_by_target.len());
+    let target_count = jobs_by_targets.keys().flatten().collect::<HashSet<_>>().len();
+    info!("Running {} jobs across {} targets...", job_count, target_count);
 
     for job in &skipped_jobs {
-        info!("=== {} {}: OK (cached)", job.target, job.path.display());
+        for m in &job.members {
+            info!("=== {}: OK (cached)", job.log_name(m));
+        }
     }
 
     let client = reqwest::Client::new();
 
-    let results: Vec<_> = stream::iter(jobs_by_target)
+    let results: Vec<_> = stream::iter(jobs_by_targets)
         .flat_map_unordered(None, |(_, jobs)| {
             let client = &client;
             stream::iter(jobs)
@@ -424,5 +600,163 @@ async fn list_targets(creds: &Credentials) -> anyhow::Result<()> {
             res.text().await.unwrap_or_else(|_| "empty".to_string())
         );
         bail!("Running failed!");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use object::{Architecture, BinaryFormat, Endianness, SectionKind, write};
+
+    use super::*;
+
+    /// Builds an ELF with the given code and teleprobe metadata.
+    fn elf(code: &[u8], target: Option<&str>, timeout: Option<u32>, group: Option<&str>) -> Vec<u8> {
+        let mut obj = write::Object::new(BinaryFormat::Elf, Architecture::Arm, Endianness::Little);
+        let mut section = |name: &str, kind, data: &[u8]| {
+            let id = obj.add_section(vec![], name.as_bytes().to_vec(), kind);
+            obj.append_section_data(id, data, 1);
+        };
+        section(".text", SectionKind::Text, code);
+        if let Some(target) = target {
+            section(".teleprobe.target", SectionKind::Other, target.as_bytes());
+        }
+        if let Some(timeout) = timeout {
+            section(".teleprobe.timeout", SectionKind::Other, &timeout.to_le_bytes());
+        }
+        if let Some(group) = group {
+            section(".teleprobe.group", SectionKind::Other, group.as_bytes());
+        }
+        obj.write().unwrap()
+    }
+
+    fn file(name: &str, elf: Vec<u8>) -> (PathBuf, Vec<u8>) {
+        (PathBuf::from(name), elf)
+    }
+
+    fn paths(job: &Job) -> Vec<String> {
+        job.members.iter().map(|m| m.path.display().to_string()).collect()
+    }
+
+    #[test]
+    fn metadata_is_read() {
+        let (meta, _) = ElfMetadata::from_elf(&elf(b"code", Some("a"), Some(30), Some("pair"))).unwrap();
+        assert_eq!(meta.target.as_deref(), Some("a"));
+        assert_eq!(meta.timeout, Some(30));
+        assert_eq!(meta.group.as_deref(), Some("pair"));
+
+        let (meta, _) = ElfMetadata::from_elf(&elf(b"code", None, None, None)).unwrap();
+        assert_eq!((meta.target, meta.timeout, meta.group), (None, None, None));
+    }
+
+    /// ELFs without a group run alone, and keep the cache key they had before groups existed.
+    #[test]
+    fn ungrouped_elfs_run_alone() {
+        let one = elf(b"one", Some("a"), Some(30), None);
+        let jobs = plan_jobs(
+            vec![
+                file("one", one.clone()),
+                file("two", elf(b"two", Some("a"), None, None)),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(jobs.iter().map(paths).collect::<Vec<_>>(), [["one"], ["two"]]);
+        assert_eq!(jobs[0].timeout, Some(30));
+        assert_eq!(jobs[1].timeout, None);
+
+        let (_, mut hasher) = ElfMetadata::from_elf(&one).unwrap();
+        hasher.update(b"a").update(&30u64.to_le_bytes());
+        assert_eq!(jobs[0].hash, hasher.finalize().to_string());
+    }
+
+    #[test]
+    fn group_members_run_together() {
+        let jobs = plan_jobs(
+            vec![
+                file("host", elf(b"host", Some("a"), Some(60), Some("pair"))),
+                file("alone", elf(b"alone", Some("a"), None, None)),
+                file("device", elf(b"device", Some("b"), Some(10), Some("pair"))),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].group.as_deref(), Some("pair"));
+        assert_eq!(paths(&jobs[0]), ["host", "device"]);
+        assert_eq!(jobs[0].targets(), ["a", "b"]);
+        // The group gets its members' longest timeout.
+        assert_eq!(jobs[0].timeout, Some(60));
+        assert_eq!(paths(&jobs[1]), ["alone"]);
+    }
+
+    #[test]
+    fn group_hash() {
+        let host = || file("host", elf(b"host", Some("a"), None, Some("pair")));
+        let device = |code: &[u8]| file("device", elf(code, Some("b"), None, Some("pair")));
+        let hash = |files| plan_jobs(files, None, None).unwrap().remove(0).hash;
+
+        let h = hash(vec![host(), device(b"device")]);
+        assert_eq!(h, hash(vec![device(b"device"), host()]), "depends on file order");
+        assert_ne!(h, hash(vec![host(), device(b"changed")]), "ignores a member's change");
+        assert_ne!(h, hash(vec![host()]), "ignores a missing member");
+    }
+
+    #[test]
+    fn group_rejects_duplicate_targets() {
+        let files = || {
+            vec![
+                file("host", elf(b"host", Some("a"), None, Some("pair"))),
+                file("device", elf(b"device", Some("a"), None, Some("pair"))),
+            ]
+        };
+        let err = plan_jobs(files(), None, None).err().unwrap().to_string();
+        assert_eq!(err, "Group pair has more than one ELF for target a: host and device");
+
+        let err = plan_jobs(files(), Some("a"), None).err().unwrap().to_string();
+        assert!(
+            err.ends_with("Note that --target sets the target of every ELF."),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn group_of_one_is_allowed() {
+        let jobs = plan_jobs(
+            vec![file("host", elf(b"host", Some("a"), None, Some("pair")))],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(paths(&jobs[0]), ["host"]);
+    }
+
+    #[test]
+    fn overrides() {
+        let jobs = plan_jobs(
+            vec![
+                file("host", elf(b"host", Some("a"), Some(10), Some("pair"))),
+                file("device", elf(b"device", Some("b"), Some(60), Some("pair"))),
+            ],
+            None,
+            Some(5),
+        )
+        .unwrap();
+        assert_eq!(jobs[0].timeout, Some(5));
+
+        let jobs = plan_jobs(vec![file("one", elf(b"one", None, Some(10), None))], Some("x"), Some(5)).unwrap();
+        assert_eq!(jobs[0].targets(), ["x"]);
+        assert_eq!(jobs[0].timeout, Some(5));
+    }
+
+    #[test]
+    fn missing_target() {
+        let err = plan_jobs(vec![file("one", elf(b"one", None, None, None))], None, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.starts_with("one: You have to either set --target"), "{}", err);
     }
 }

@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 static LOGGER: OnceLock<CaptureLogger> = OnceLock::new();
 
 pub(crate) fn init() {
+    init_logger();
+    log_panics::init();
+}
+
+/// Installs the logger without the panic hook, which aborts the process on any panic.
+pub(crate) fn init_logger() {
     let mut inner_logger = pretty_env_logger::formatted_builder();
     inner_logger.parse_filters("trace");
     let inner_logger = inner_logger.build();
@@ -52,7 +58,6 @@ pub(crate) fn init() {
 
     log::set_max_level(LevelFilter::Trace);
     log::set_logger(LOGGER.get().unwrap()).unwrap();
-    log_panics::init();
 }
 
 pub fn with_capture<F, R>(f: F) -> (R, Vec<LogEntry>)
