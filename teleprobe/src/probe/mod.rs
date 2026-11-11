@@ -8,6 +8,8 @@ use probe_rs::probe::{DebugProbeSelector, Probe, WireProtocol};
 use probe_rs::{MemoryInterface, Permissions, Session};
 
 const SETTLE_REPROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const ATTACH_ATTEMPTS: u32 = 3;
+const ATTACH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Clone, Parser)]
 pub struct Opts {
@@ -135,6 +137,25 @@ pub fn connect(opts: &Opts) -> Result<Session> {
 
     log::debug!("opened probe");
 
+    // The firmware left on the target from the previous run boots on power up and runs while we
+    // attach. If it resets itself or stalls the bus (eg. flash erases), attach can time out.
+    // Retry without power cycling again, which would boot it again.
+    let mut attempt = 1;
+    loop {
+        match attach(probe, opts, &registry) {
+            Ok(sess) => return Ok(sess),
+            Err(e) if attempt < ATTACH_ATTEMPTS => {
+                log::warn!("attach failed (attempt {attempt}/{ATTACH_ATTEMPTS}), retrying: {e:#}");
+                std::thread::sleep(ATTACH_RETRY_DELAY);
+                probe = open_probe(opts)?;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn attach(mut probe: Probe, opts: &Opts, registry: &Registry) -> Result<Session> {
     if let Some(speed) = opts.speed {
         probe.set_speed(speed)?;
     }
