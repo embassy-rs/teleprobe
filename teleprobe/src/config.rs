@@ -9,6 +9,9 @@ fn default_default_timeout() -> u64 {
 fn default_max_timeout() -> u64 {
     60
 }
+fn default_reserve_after_secs() -> u64 {
+    30
+}
 
 #[derive(Clone, Deserialize)]
 pub struct Config {
@@ -18,6 +21,9 @@ pub struct Config {
     pub default_timeout: u64,
     #[serde(default = "default_max_timeout")]
     pub max_timeout: u64,
+    /// How long a job may wait before it reserves its targets, so later jobs can't take them.
+    #[serde(default = "default_reserve_after_secs")]
+    pub reserve_after_secs: u64,
 }
 
 #[derive(Clone, Deserialize)]

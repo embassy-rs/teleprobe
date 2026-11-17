@@ -33,3 +33,19 @@ macro_rules! timeout {
         static _TELEPROBE_TIMEOUT: u32 = $val;
     };
 }
+
+/// Put the binary in a group. The binaries of a group run at the same time, each on its own target, and
+/// the group passes only if all of them pass.
+///
+/// ```rust
+/// teleprobe_meta::group!(b"usb-host-device");
+/// ```
+#[macro_export]
+macro_rules! group {
+    ($val:literal) => {
+        #[unsafe(link_section = ".teleprobe.group")]
+        #[used]
+        #[unsafe(no_mangle)] // prevent invoking the macro multiple times
+        static _TELEPROBE_GROUP: [u8; $val.len()] = *$val;
+    };
+}

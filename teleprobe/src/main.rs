@@ -6,6 +6,7 @@ pub mod logutil;
 pub mod probe;
 pub mod rtt;
 pub mod run;
+pub mod scheduler;
 pub mod server;
 pub mod util;
 
