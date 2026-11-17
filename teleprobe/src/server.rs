@@ -206,16 +206,7 @@ fn targets(cx: Arc<Mutex<Context>>) -> api::TargetList {
     let up_probes = Lister::new().list_all();
 
     for target in targets {
-        let is_up = up_probes.iter().any(|probe| {
-            probe.vendor_id == target.probe.vendor_id
-                && probe.product_id == target.probe.product_id
-                && target
-                    .probe
-                    .serial_number
-                    .as_ref()
-                    .map(|s| Some(s) == probe.serial_number.as_ref())
-                    .unwrap_or(true)
-        });
+        let is_up = up_probes.iter().any(|probe| target.probe.matches_probe(probe));
         res.push(api::Target {
             name: target.name,
             chip: target.chip,

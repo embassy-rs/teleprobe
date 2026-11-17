@@ -54,11 +54,14 @@ pub fn list() -> Result<()> {
     }
     for probe in probes {
         let probe_type = probe.probe_type();
+        let probe_rs::probe::ProbeTransport::Usb(usb) = &probe.transport;
         println!(
             "{:04x}:{:04x}:{} -- {} {}",
-            probe.vendor_id,
-            probe.product_id,
-            probe.serial_number.unwrap_or_else(|| "SN unspecified".to_string()),
+            usb.vendor_id,
+            usb.product_id,
+            usb.serial_number
+                .clone()
+                .unwrap_or_else(|| "SN unspecified".to_string()),
             probe_type,
             probe.identifier,
         );
@@ -71,15 +74,15 @@ pub fn connect(opts: &Opts) -> Result<Session> {
     let registry = Registry::from_builtin_families();
 
     if opts.power_reset {
-        let Some(selector) = &opts.probe else {
+        let Some(probe_rs::probe::DebugProbeSelector::Usb(selector)) = &opts.probe else {
             bail!("power reset requires a serial number");
         };
-        if selector.serial_number.is_none() {
+        let Some(serial) = &selector.serial_number else {
             bail!("power reset requires a serial number");
         };
 
         log::debug!("probe power reset");
-        if let Err(err) = power_reset(selector.serial_number.as_ref().unwrap(), 1.0) {
+        if let Err(err) = power_reset(serial, 1.0) {
             log::warn!("power reset failed for: {}", err);
         }
     }

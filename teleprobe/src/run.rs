@@ -559,7 +559,8 @@ fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Rt
     let mut core = sess.core(0).unwrap();
 
     for try_index in 0..=NUM_RETRIES {
-        rtt_res = Rtt::attach_region(&mut core, &ScanRegion::Exact(rtt_addr as _));
+        let rtt_target = probe_rs::rtt::RttTarget::from(&core);
+        rtt_res = Rtt::attach_region(&mut core, &rtt_target, &ScanRegion::Exact(rtt_addr as _));
         match rtt_res {
             Ok(_) => {
                 log::debug!("Successfully attached RTT");
