@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use log::{info, warn};
+
+use crate::rtt::RttReader;
 use object::ObjectSymbol;
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use probe_rs::config::MemoryRegion;
 use probe_rs::flashing::{DownloadOptions, ElfLoader, ElfOptions};
-use probe_rs::rtt::{self, Rtt, ScanRegion};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 use probe_rs_debug::{DebugInfo, DebugRegisters};
 
@@ -57,11 +58,10 @@ pub fn run(sess: &mut Session, elf_bytes: &[u8], opts: Options) -> anyhow::Resul
 struct Runner {
     opts: Options,
 
-    rtt_addr: u32,
     _main_addr: u32,
     _vector_table: VectorTable,
 
-    defmt: Rtt,
+    rtt: RttReader,
     defmt_table: Box<Table>,
     defmt_locs: BTreeMap<u64, Location>,
     defmt_stream: Box<dyn StreamDecoder>,
@@ -259,18 +259,15 @@ impl Runner {
             core.run()?;
         }
 
-        let defmt = setup_logging_channel(rtt_addr, sess)?;
-
         let defmt_stream = unsafe { fuck_it(&table) }.new_stream_decoder();
 
         Ok(Self {
             opts,
-            rtt_addr: rtt_addr,
             _main_addr: main_addr,
             _vector_table: vector_table,
             defmt_table: table,
             defmt_locs: locs,
-            defmt,
+            rtt: RttReader::new(rtt_addr),
             defmt_stream,
             di,
         })
@@ -279,47 +276,14 @@ impl Runner {
     fn poll(&mut self, sess: &mut Session) -> anyhow::Result<()> {
         let current_dir = std::env::current_dir()?;
 
-        let mut read_buf = [0; 1024];
-        let needs_rtt = match self
-            .defmt
-            .up_channel(0)
-            .unwrap()
-            .read(&mut sess.core(0).unwrap(), &mut read_buf)
-        {
-            Ok(0) => {
-                // Sleep to reduce CPU usage when defmt didn't return any data.
-                std::thread::sleep(Duration::from_millis(POLL_SLEEP_MILLIS));
-                return Ok(());
-            }
-            Ok(n) => {
-                self.defmt_stream.received(&read_buf[..n]);
-
-                false
-            }
-            Err(rtt::Error::ControlBlockCorrupted(error)) => {
-                warn!("RTT control block corrupted ({error}), re-attaching");
-
-                true
-            }
-            Err(rtt::Error::ReadPointerChanged) => {
-                warn!("RTT read pointer changed, re-attaching");
-
-                true
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        if needs_rtt {
+        let mut data = Vec::new();
+        let n = self.rtt.read(&mut sess.core(0)?, &mut data)?;
+        if n == 0 {
             // Sleep to reduce CPU usage when defmt didn't return any data.
             std::thread::sleep(Duration::from_millis(POLL_SLEEP_MILLIS));
-
-            match setup_logging_channel(self.rtt_addr, sess) {
-                Ok(rtt) => self.defmt = rtt,
-                _ => {}
-            }
-
             return Ok(());
         }
+        self.defmt_stream.received(&data);
 
         loop {
             match self.defmt_stream.decode() {
@@ -550,62 +514,6 @@ impl Runner {
             }
         }
     }
-}
-
-fn setup_logging_channel(rtt_addr: u32, sess: &mut Session) -> anyhow::Result<Rtt> {
-    const NUM_RETRIES: usize = 10; // picked at random, increase if necessary
-    let mut rtt_res: Result<Rtt, probe_rs::rtt::Error> = Err(probe_rs::rtt::Error::ControlBlockNotFound);
-
-    let mut core = sess.core(0).unwrap();
-
-    for try_index in 0..=NUM_RETRIES {
-        let rtt_target = probe_rs::rtt::RttTarget::from(&core);
-        rtt_res = Rtt::attach_region(&mut core, &rtt_target, &ScanRegion::Exact(rtt_addr as _));
-        match rtt_res {
-            Ok(_) => {
-                log::debug!("Successfully attached RTT");
-                break;
-            }
-            Err(probe_rs::rtt::Error::ControlBlockNotFound) => {
-                if try_index < NUM_RETRIES {
-                    log::trace!(
-                        "Could not attach because the target's RTT control block isn't initialized (yet). retrying"
-                    );
-                } else {
-                    log::error!("Max number of RTT attach retries exceeded.");
-                    return Err(anyhow!(probe_rs::rtt::Error::ControlBlockNotFound));
-                }
-            }
-            Err(e) => {
-                return Err(anyhow!(e));
-            }
-        }
-    }
-
-    // this block is only executed when rtt was successfully attached before
-    let mut rtt = rtt_res.expect("unreachable");
-    for ch in rtt.up_channels().iter() {
-        log::debug!(
-            "up channel {}: {:?}, buffer size {} bytes",
-            ch.number(),
-            ch.name(),
-            ch.buffer_size()
-        );
-    }
-    for ch in rtt.down_channels().iter() {
-        log::debug!(
-            "down channel {}: {:?}, buffer size {} bytes",
-            ch.number(),
-            ch.name(),
-            ch.buffer_size()
-        );
-    }
-
-    rtt.up_channels()
-        .first()
-        .ok_or_else(|| anyhow!("RTT up channel 0 not found"))?;
-
-    Ok(rtt)
 }
 
 fn get_rtt_main_from(elf: &ElfFile) -> anyhow::Result<(Option<u32>, u32)> {

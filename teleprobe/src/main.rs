@@ -4,6 +4,7 @@ pub mod client;
 pub mod config;
 pub mod logutil;
 pub mod probe;
+pub mod rtt;
 pub mod run;
 pub mod server;
 pub mod util;
