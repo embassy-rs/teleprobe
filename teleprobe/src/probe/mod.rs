@@ -129,7 +129,10 @@ pub fn connect(opts: &Opts) -> Result<Session> {
         log::debug!("rp2040: resetting SIO and processors");
         core.write_word_32(PSM_WDSEL, PSM_SEL_SIO | PSM_SEL_PROC0 | PSM_SEL_PROC1)?;
         core.write_word_32(WATCHDOG_CTRL, WATCHDOG_CTRL_ENABLE)?;
-        core.write_word_32(WATCHDOG_CTRL, WATCHDOG_CTRL_ENABLE | WATCHDOG_CTRL_TRIGGER)?;
+        // The chip resets while this write is in flight, so the DP never acknowledges it.
+        if let Err(e) = core.write_word_32(WATCHDOG_CTRL, WATCHDOG_CTRL_ENABLE | WATCHDOG_CTRL_TRIGGER) {
+            log::debug!("rp2040: watchdog trigger write not acknowledged (expected): {e:?}");
+        }
         log::debug!("rp2040: reset done, reattaching");
 
         // reopen probe.
