@@ -10,7 +10,7 @@ use log::{error, info};
 use parking_lot::Mutex;
 use probe_rs::probe::list::Lister;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio::task::spawn_blocking;
 use warp::http::StatusCode;
 use warp::reply::{html, with_status};
@@ -35,8 +35,16 @@ fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> 
     Ok(())
 }
 
-async fn run_with_log_capture(elf: Bytes, probe: probe::Opts, timeout: Duration) -> (bool, Vec<u8>) {
+async fn run_with_log_capture(
+    target_guard: OwnedMutexGuard<()>,
+    elf: Bytes,
+    probe: probe::Opts,
+    timeout: Duration,
+) -> (bool, Vec<u8>) {
     let (ok, entries) = spawn_blocking(move || {
+        // The guard lives in the blocking task, not in the request handler. If the client disconnects,
+        // the handler is dropped but the run continues, and must keep the target locked until it ends.
+        let _target_guard = target_guard;
         crate::logutil::with_capture(|| match run_firmware_on_device(elf, probe, timeout) {
             Ok(()) => true,
             Err(e) => {
@@ -176,7 +184,7 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         .or_insert_with(|| Arc::new(AsyncMutex::new(())))
         .clone();
 
-    let _target_guard = target_mutex.lock().await;
+    let target_guard = target_mutex.lock_owned().await;
 
     let probe = probe::Opts {
         chip: target.chip.clone(),
@@ -194,7 +202,7 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         Duration::from_secs(args.timeout.unwrap_or(config.default_timeout).min(config.max_timeout))
     };
 
-    let (ok, logs) = run_with_log_capture(elf, probe, timeout).await;
+    let (ok, logs) = run_with_log_capture(target_guard, elf, probe, timeout).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
 
     Ok(with_status(logs, status))
