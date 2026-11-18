@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::bail;
@@ -21,13 +22,20 @@ use crate::auth::oidc::Client;
 use crate::config::{Auth, Config, OidcAuthRule};
 #[cfg(target_os = "linux")]
 use crate::probe::power_enable;
+use crate::util::ondrop::OnDrop;
 use crate::{api, probe, run};
 
-fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> anyhow::Result<()> {
+fn run_firmware_on_device(
+    elf: Bytes,
+    probe: probe::Opts,
+    timeout: Duration,
+    cancel: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     let mut sess = probe::connect(&probe)?;
 
     let opts = run::Options {
         deadline: Some(Instant::now() + timeout),
+        cancel: Some(cancel),
         ..Default::default()
     };
     run::run(&mut sess, &elf, opts)?;
@@ -40,12 +48,13 @@ async fn run_with_log_capture(
     elf: Bytes,
     probe: probe::Opts,
     timeout: Duration,
+    cancel: Arc<AtomicBool>,
 ) -> (bool, Vec<u8>) {
     let (ok, entries) = spawn_blocking(move || {
         // The guard lives in the blocking task, not in the request handler. If the client disconnects,
         // the handler is dropped but the run continues, and must keep the target locked until it ends.
         let _target_guard = target_guard;
-        crate::logutil::with_capture(|| match run_firmware_on_device(elf, probe, timeout) {
+        crate::logutil::with_capture(|| match run_firmware_on_device(elf, probe, timeout, cancel) {
             Ok(()) => true,
             Err(e) => {
                 error!("Run failed: {:?}", e);
@@ -202,7 +211,15 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         Duration::from_secs(args.timeout.unwrap_or(config.default_timeout).min(config.max_timeout))
     };
 
-    let (ok, logs) = run_with_log_capture(target_guard, elf, probe, timeout).await;
+    // If the client disconnects, this handler is dropped, and nobody is waiting for the result.
+    // Cancel the run so the target is freed early. After a normal finish, this does nothing.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = OnDrop::new({
+        let cancel = cancel.clone();
+        move || cancel.store(true, Ordering::Relaxed)
+    });
+
+    let (ok, logs) = run_with_log_capture(target_guard, elf, probe, timeout, cancel).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
 
     Ok(with_status(logs, status))
