@@ -25,6 +25,13 @@ pub struct Opts {
     #[clap(long)]
     pub chip: String,
 
+    /// Index of the core to run the image on (0 = main core).
+    ///
+    /// On multi-core chips (e.g. STM32H745/H755) this allows running an image
+    /// on a secondary core.
+    #[clap(long, default_value = "0")]
+    pub core: usize,
+
     /// Connect to device when NRST is pressed.
     #[clap(long)]
     pub connect_under_reset: bool,
@@ -183,11 +190,18 @@ fn attach(mut probe: Probe, opts: &Opts, registry: &Registry) -> Result<Session>
     // The image then starts with stale NVIC/peripheral state, or inside the HardFault handler
     // with all interrupts masked.
     //
-    // We only ever run images on the main core, so restrict RAM regions to it.
-    let main_core = target.cores[0].name.clone();
+    // We only ever run images on one core at a time, so restrict RAM regions to it.
+    //
+    // Note: when the run core is a secondary core (e.g. STM32H745/H755 CM4), the
+    // loader's `reset_and_halt` of it is a chip-wide system reset on those parts.
+    // `run` re-halts and manually starts the secondary core afterwards.
+    let run_core = match target.cores.get(opts.core) {
+        Some(core) => core.name.clone(),
+        None => bail!("core index {} out of range for chip {}", opts.core, opts.chip),
+    };
     for region in &mut target.memory_map {
         if let MemoryRegion::Ram(ram) = region {
-            ram.cores.retain(|c| *c == main_core);
+            ram.cores.retain(|c| *c == run_core);
         }
     }
 
@@ -233,15 +247,15 @@ pub(crate) async fn power_enable() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn power_reset(probe_serial: &str, cycle_delay_seconds: f64) -> Result<()> {
-    use rustix::fd::OwnedFd;
-    use rustix::fs::{Mode, OFlags};
     use std::fs::File;
     use std::io::Write;
+    use std::thread::sleep;
     use std::time::Duration;
 
     use anyhow::anyhow;
     use nusb::MaybeFuture;
-    use std::thread::sleep;
+    use rustix::fd::OwnedFd;
+    use rustix::fs::{Mode, OFlags};
 
     fn to_hex(s: &str) -> String {
         use std::fmt::Write;

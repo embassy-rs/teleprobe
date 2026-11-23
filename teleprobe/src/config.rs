@@ -66,6 +66,10 @@ pub struct Target {
     pub speed: Option<u32>,
     #[serde(default)]
     pub power_reset: bool,
+    /// Index of the core to run images on (0 = main core). On multi-core chips
+    /// (e.g. STM32H745/H755) a second target can run images on the secondary core.
+    #[serde(default)]
+    pub core: Option<usize>,
     #[serde(default = "default_cycle_delay_seconds")]
     pub cycle_delay_seconds: f64,
     #[serde(default = "default_max_settle_time_millis")]

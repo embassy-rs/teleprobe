@@ -28,6 +28,7 @@ fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> 
 
     let opts = run::Options {
         deadline: Some(Instant::now() + timeout),
+        core: probe.core,
         ..Default::default()
     };
     run::run(&mut sess, &elf, opts)?;
@@ -186,6 +187,7 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         power_reset: target.power_reset,
         cycle_delay_seconds: target.cycle_delay_seconds,
         max_settle_time_millis: target.max_settle_time_millis,
+        core: target.core.unwrap_or(0),
         protocol: None,
     };
 
@@ -217,6 +219,7 @@ fn targets(cx: Arc<Mutex<Context>>) -> api::TargetList {
             power_reset: target.power_reset,
             cycle_delay_seconds: target.cycle_delay_seconds,
             max_settle_time_millis: target.max_settle_time_millis,
+            core: target.core,
         });
     }
 

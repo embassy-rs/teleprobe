@@ -88,6 +88,7 @@ async fn async_main() -> anyhow::Result<()> {
                 let opts = Options {
                     deadline: timeout.map(|t| Instant::now() + Duration::from_secs(t)),
                     skip_reset: no_reset,
+                    core: probe.core,
                     ..Default::default()
                 };
                 crate::run::run(&mut sess, &elf, opts)

@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use log::{info, warn};
-
-use crate::rtt::RttReader;
 use object::ObjectSymbol;
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use probe_rs::config::MemoryRegion;
 use probe_rs::flashing::{DownloadOptions, ElfLoader, ElfOptions};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 use probe_rs_debug::{DebugInfo, DebugRegisters};
+
+use crate::rtt::RttReader;
 
 pub const LR: RegisterId = RegisterId(14);
 pub const PC: RegisterId = RegisterId(15);
@@ -37,6 +37,11 @@ pub struct Options {
     /// This is OR-ed with a chip-name auto-detect inside `run`, so RP23xx
     /// always skips regardless of this flag.
     pub skip_reset: bool,
+    /// Index of the core to run the image on (0 = main core). Secondary cores
+    /// cannot be reset in isolation on some chips (e.g. on STM32H745/H755 the
+    /// secondary core's SYSRESETREQ is a chip-wide system reset), so they are
+    /// halted and started manually instead of `reset_and_halt`-ed.
+    pub core: usize,
 }
 
 impl Default for Options {
@@ -45,6 +50,7 @@ impl Default for Options {
             do_flash: true,
             deadline: None,
             skip_reset: false,
+            core: 0,
         }
     }
 }
@@ -131,7 +137,7 @@ impl Runner {
         // reset ALL cores other than the main one.
         // This is needed for rp2040 core1.
         for (i, _) in sess.list_cores() {
-            if i != 0 {
+            if i != 0 && i != opts.core {
                 sess.core(i)?.reset()?;
             }
         }
@@ -194,8 +200,6 @@ impl Runner {
         let skip_reset = opts.skip_reset || is_rp23;
 
         {
-            let mut core = sess.core(0)?;
-
             // When running from RAM the image was loaded into a core that was already reset and
             // halted, and nothing has run since, so a second reset only does harm: on STM32
             // parts with ECC SRAM the last word written to each bank is still in the bank's
@@ -203,7 +207,27 @@ impl Runner {
             // reset erases SRAM2 unless an option byte says otherwise. Both corrupt whatever
             // part of the image landed there.
             let loaded_into_ram = run_from_ram && opts.do_flash;
-            if !skip_reset && !loaded_into_ram {
+
+            if opts.core != 0 && !skip_reset {
+                // A secondary core cannot be reset in isolation: on STM32H745/H755
+                // its SYSRESETREQ is a chip-wide system reset. A RAM image also
+                // cannot self-boot, since the secondary core's boot address is an
+                // option byte pointing at flash. So reset the chip through the main
+                // core instead (it is re-halted by its vector catch): the secondary
+                // core then starts freshly, either on its own image (flash images
+                // linked at its boot address) or on garbage, and is halted and
+                // started manually below.
+                //
+                // Note this forgoes the `loaded_into_ram` caveat above: on parts
+                // with ECC SRAM, the last words of a RAM image may be lost here.
+                sess.core(0)?.reset_and_halt(TIMEOUT)?;
+            }
+
+            let mut core = sess.core(opts.core)?;
+
+            if opts.core != 0 {
+                core.halt(TIMEOUT)?;
+            } else if !skip_reset && !loaded_into_ram {
                 core.reset_and_halt(TIMEOUT)?;
             }
 
@@ -212,7 +236,14 @@ impl Runner {
                 bail!("RTT not supported on device without HW breakpoints");
             }
 
-            if run_from_ram {
+            if run_from_ram || opts.core != 0 {
+                if opts.core != 0 {
+                    // Force thread mode before redirecting the core: the secondary
+                    // core may have entered HardFault or lockup while running
+                    // whatever was in its boot area before we halted it.
+                    core.write_word_32(0xE000ED0C, 0x05FA_0001)?; // AIRCR: VECTKEY | VECTCLRACTIVE
+                    core.write_core_reg(XPSR, 0x0100_0000u32)?;
+                }
                 core.write_core_reg(PC, vector_table.reset)?;
                 core.write_core_reg(SP, vector_table.initial_sp)?;
 
@@ -277,7 +308,7 @@ impl Runner {
         let current_dir = std::env::current_dir()?;
 
         let mut data = Vec::new();
-        let n = self.rtt.read(&mut sess.core(0)?, &mut data)?;
+        let n = self.rtt.read(&mut sess.core(self.opts.core)?, &mut data)?;
         if n == 0 {
             // Sleep to reduce CPU usage when defmt didn't return any data.
             std::thread::sleep(Duration::from_millis(POLL_SLEEP_MILLIS));
@@ -349,14 +380,14 @@ impl Runner {
                 && Instant::now() > deadline
             {
                 warn!("Deadline exceeded!");
-                let mut core = sess.core(0)?;
+                let mut core = sess.core(self.opts.core)?;
                 self.dump_state(&mut core, true)?;
                 bail!("Deadline exceeded")
             }
 
             self.poll(sess)?;
 
-            let mut core = sess.core(0)?;
+            let mut core = sess.core(self.opts.core)?;
             let is_halted = core.core_halted()?;
 
             if is_halted && was_halted {
@@ -365,7 +396,7 @@ impl Runner {
             was_halted = is_halted;
         }
 
-        let mut core = sess.core(0)?;
+        let mut core = sess.core(self.opts.core)?;
 
         let is_hardfault = self.dump_state(&mut core, false)?;
         if is_hardfault {
