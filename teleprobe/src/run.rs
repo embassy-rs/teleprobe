@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use defmt_decoder::{DecodeError, Location, StreamDecoder, Table};
 use log::{info, warn};
-
-use crate::rtt::RttReader;
 use object::ObjectSymbol;
 use object::read::{File as ElfFile, Object as _, ObjectSection as _};
 use probe_rs::config::MemoryRegion;
 use probe_rs::flashing::{DownloadOptions, ElfLoader, ElfOptions};
 use probe_rs::{Core, MemoryInterface, RegisterId, Session};
 use probe_rs_debug::{DebugInfo, DebugRegisters};
+
+use crate::rtt::RttReader;
 
 pub const LR: RegisterId = RegisterId(14);
 pub const PC: RegisterId = RegisterId(15);
@@ -79,7 +79,7 @@ impl Runner {
 
         let di = DebugInfo::from_raw(elf_bytes)?;
 
-        let table = Box::new(defmt_decoder::Table::parse(elf_bytes)?.expect("no defmt table"));
+        let table = get_defmt_table_from(elf_bytes)?;
         let locs = table.get_locations(elf_bytes)?;
         if !table.is_empty() && locs.is_empty() {
             log::warn!("insufficient DWARF info; compile your program with `debug = 2` to enable location info");
@@ -88,44 +88,7 @@ impl Runner {
         //    bail!("(BUG) location info is incomplete; it will be omitted from the output");
         //}
 
-        // sections used in cortex-m-rt
-        // NOTE we won't load `.uninit` so it is not included here
-        // NOTE we don't load `.bss` because the app (cortex-m-rt) will zero it
-        let candidates = [".vector_table", ".text", ".rodata", ".data"];
-
-        let mut vector_table = None;
-        for sect in elf.sections() {
-            if let Ok(name) = sect.name() {
-                let size = sect.size();
-                // skip empty sections
-                if candidates.contains(&name) && size != 0 {
-                    let start = sect.address();
-                    if size % 4 != 0 || start % 4 != 0 {
-                        // we could support unaligned sections but let's not do that now
-                        bail!("section `{}` is not 4-byte aligned", name);
-                    }
-
-                    let start = start.try_into()?;
-                    let data = sect
-                        .data()?
-                        .chunks_exact(4)
-                        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
-                        .collect::<Vec<_>>();
-
-                    if name == ".vector_table" {
-                        vector_table = Some(VectorTable {
-                            location: start,
-                            // Initial stack pointer
-                            initial_sp: data[0],
-                            reset: data[1],
-                            hard_fault: data[3],
-                        });
-                    }
-                }
-            }
-        }
-
-        let vector_table = vector_table.ok_or_else(|| anyhow!("`.vector_table` section is missing"))?;
+        let vector_table = get_vector_table_from(&elf)?;
         log::debug!("vector table: {:x?}", vector_table);
 
         // reset ALL cores other than the main one.
@@ -516,6 +479,49 @@ impl Runner {
     }
 }
 
+fn get_defmt_table_from(elf_bytes: &[u8]) -> anyhow::Result<Box<Table>> {
+    let table = Table::parse(elf_bytes)?.ok_or_else(|| anyhow!("defmt table is missing"))?;
+    Ok(Box::new(table))
+}
+
+fn get_vector_table_from(elf: &ElfFile) -> anyhow::Result<VectorTable> {
+    // Sections used in cortex-m-rt. `.uninit` is not loaded, and the app zeros `.bss`.
+    let candidates = [".vector_table", ".text", ".rodata", ".data"];
+    let mut vector_table = None;
+    for sect in elf.sections() {
+        if let Ok(name) = sect.name() {
+            let size = sect.size();
+            if candidates.contains(&name) && size != 0 {
+                let start = sect.address();
+                if size % 4 != 0 || start % 4 != 0 {
+                    bail!("section `{}` is not 4-byte aligned", name);
+                }
+
+                let start = start.try_into()?;
+                let data = sect
+                    .data()?
+                    .chunks_exact(4)
+                    .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect::<Vec<_>>();
+
+                if name == ".vector_table" {
+                    if data.len() < 4 {
+                        bail!("`.vector_table` section must contain at least four entries");
+                    }
+                    vector_table = Some(VectorTable {
+                        location: start,
+                        initial_sp: data[0],
+                        reset: data[1],
+                        hard_fault: data[3],
+                    });
+                }
+            }
+        }
+    }
+
+    vector_table.ok_or_else(|| anyhow!("`.vector_table` section is missing"))
+}
+
 fn get_rtt_main_from(elf: &ElfFile) -> anyhow::Result<(Option<u32>, u32)> {
     let mut rtt = None;
     let mut main = None;
@@ -546,4 +552,95 @@ struct VectorTable {
     reset: u32,
     // entry 3: HardFault handler
     hard_fault: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use object::write::{Object, Symbol, SymbolSection};
+    use object::{Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind, SymbolScope};
+
+    use super::{ElfFile, get_defmt_table_from, get_vector_table_from};
+
+    fn elf(sections: &[(&str, &[u8])], symbols: &[&str]) -> Vec<u8> {
+        let mut elf = Object::new(BinaryFormat::Elf, Architecture::Arm, Endianness::Little);
+        for (name, data) in sections {
+            let section = elf.add_section(Vec::new(), name.as_bytes().to_vec(), SectionKind::ReadOnlyData);
+            elf.section_mut(section).set_data(data.to_vec(), 4);
+        }
+        for name in symbols {
+            elf.add_symbol(Symbol {
+                name: name.as_bytes().to_vec(),
+                value: 0,
+                size: 0,
+                kind: SymbolKind::Data,
+                scope: SymbolScope::Linkage,
+                weak: false,
+                section: SymbolSection::Absolute,
+                flags: SymbolFlags::None,
+            });
+        }
+        elf.write().unwrap()
+    }
+
+    #[test]
+    fn missing_defmt_table_returns_error() {
+        let bytes = elf(&[], &[]);
+        assert!(get_defmt_table_from(&bytes).is_err());
+    }
+
+    #[test]
+    fn malformed_elf_returns_error() {
+        assert!(get_defmt_table_from(b"not an ELF").is_err());
+    }
+
+    #[test]
+    fn supported_defmt_metadata_is_accepted() {
+        let bytes = elf(&[(".defmt", &[0])], &["_defmt_version_ = 4", "_defmt_encoding_ = raw"]);
+        let table = get_defmt_table_from(&bytes).unwrap();
+        assert_eq!(table.encoding(), defmt_decoder::Encoding::Raw);
+    }
+
+    #[test]
+    fn short_vector_tables_return_error() {
+        for length in [0, 4, 8, 12] {
+            let bytes = elf(&[(".vector_table", &vec![0; length])], &[]);
+            let elf = ElfFile::parse(bytes.as_slice()).unwrap();
+            assert!(
+                get_vector_table_from(&elf).is_err(),
+                "accepted {length}-byte vector table"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_vector_table_returns_error() {
+        let bytes = elf(&[(".text", &[0; 16])], &[]);
+        let elf = ElfFile::parse(bytes.as_slice()).unwrap();
+        assert!(get_vector_table_from(&elf).is_err());
+    }
+
+    #[test]
+    fn unaligned_vector_table_returns_error() {
+        let bytes = elf(&[(".vector_table", &[0; 17])], &[]);
+        let elf = ElfFile::parse(bytes.as_slice()).unwrap();
+        assert!(get_vector_table_from(&elf).is_err());
+    }
+
+    #[test]
+    fn vector_table_decodes_required_entries() {
+        // SP, Reset, NMI, HardFault, followed by an unused entry.
+        let data = [
+            0x00, 0x00, 0x02, 0x20, 0x01, 0x01, 0x00, 0x20, 0x01, 0x02, 0x00, 0x20, 0x01, 0x03, 0x00, 0x20, 0x01, 0x04,
+            0x00, 0x20,
+        ];
+        for length in [16, 20] {
+            let bytes = elf(&[(".vector_table", &data[..length])], &[]);
+            let elf = ElfFile::parse(bytes.as_slice()).unwrap();
+            let table = get_vector_table_from(&elf).unwrap();
+            assert_eq!(table.location, 0);
+            assert_eq!(table.initial_sp, 0x2002_0000);
+            assert_eq!(table.reset, 0x2000_0101);
+            assert_eq!(table.hard_fault, 0x2000_0301);
+        }
+    }
 }
