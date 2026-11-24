@@ -35,9 +35,15 @@ fn run_firmware_on_device(elf: Bytes, probe: probe::Opts, timeout: Duration) -> 
     Ok(())
 }
 
-async fn run_with_log_capture(elf: Bytes, probe: probe::Opts, timeout: Duration) -> (bool, Vec<u8>) {
+async fn run_with_log_capture(
+    target_mutex: Arc<AsyncMutex<()>>,
+    run: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+) -> (bool, Vec<u8>) {
+    let target_guard = target_mutex.lock_owned().await;
     let (ok, entries) = spawn_blocking(move || {
-        crate::logutil::with_capture(|| match run_firmware_on_device(elf, probe, timeout) {
+        // A disconnected HTTP waiter must not release a running worker's target.
+        let _target_guard = target_guard;
+        crate::logutil::with_capture(|| match run() {
             Ok(()) => true,
             Err(e) => {
                 error!("Run failed: {:?}", e);
@@ -176,8 +182,6 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         .or_insert_with(|| Arc::new(AsyncMutex::new(())))
         .clone();
 
-    let _target_guard = target_mutex.lock().await;
-
     let probe = probe::Opts {
         chip: target.chip.clone(),
         connect_under_reset: target.connect_under_reset,
@@ -194,7 +198,7 @@ async fn handle_run(name: String, args: RunArgs, elf: Bytes, cx: Arc<Mutex<Conte
         Duration::from_secs(args.timeout.unwrap_or(config.default_timeout).min(config.max_timeout))
     };
 
-    let (ok, logs) = run_with_log_capture(elf, probe, timeout).await;
+    let (ok, logs) = run_with_log_capture(target_mutex, move || run_firmware_on_device(elf, probe, timeout)).await;
     let status = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
 
     Ok(with_status(logs, status))
@@ -327,4 +331,109 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
 
 fn with_val<T: Clone + Send>(val: T) -> impl Filter<Extract = (T,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || val.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    use tokio::runtime::Builder;
+    use tokio::sync::{Mutex, oneshot};
+    use tokio::time::timeout;
+
+    use super::run_with_log_capture;
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn cancelling_running_request_keeps_target_locked_until_worker_finishes() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let target = Arc::new(Mutex::new(()));
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let request = tokio::spawn(run_with_log_capture(target.clone(), move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(TEST_TIMEOUT)?;
+                Ok(())
+            }));
+
+            timeout(TEST_TIMEOUT, started_rx).await.unwrap().unwrap();
+            request.abort();
+            let cancelled = request.await.unwrap_err().is_cancelled();
+            let still_locked = target.try_lock().is_err();
+
+            // Let the worker exit before asserting, including on the broken path.
+            release_tx.send(()).unwrap();
+            let guard = timeout(TEST_TIMEOUT, target.lock()).await.unwrap();
+            drop(guard);
+
+            assert!(cancelled);
+            assert!(still_locked, "cancellation released a running worker's target");
+        });
+    }
+
+    #[test]
+    fn cancelling_queued_request_does_not_start_worker() {
+        struct InvocationWitness {
+            invoked: bool,
+            dropped: Option<oneshot::Sender<bool>>,
+        }
+
+        impl Drop for InvocationWitness {
+            fn drop(&mut self) {
+                if let Some(dropped) = self.dropped.take() {
+                    let _ = dropped.send(self.invoked);
+                }
+            }
+        }
+
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let target = Arc::new(Mutex::new(()));
+            let guard = target.lock().await;
+            let (dropped_tx, dropped_rx) = oneshot::channel();
+            let mut witness = InvocationWitness {
+                invoked: false,
+                dropped: Some(dropped_tx),
+            };
+            let mut request = Box::pin(run_with_log_capture(target.clone(), move || {
+                witness.invoked = true;
+                drop(witness);
+                Ok(())
+            }));
+
+            assert!(futures::poll!(request.as_mut()).is_pending());
+            drop(request);
+            drop(guard);
+            let invoked = timeout(TEST_TIMEOUT, dropped_rx).await.unwrap().unwrap();
+            let guard = timeout(TEST_TIMEOUT, target.lock()).await.unwrap();
+
+            assert!(!invoked);
+            drop(guard);
+        });
+    }
+
+    #[test]
+    fn completed_workers_release_target_and_report_outcome() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let target = Arc::new(Mutex::new(()));
+            let (ok, _) = timeout(TEST_TIMEOUT, run_with_log_capture(target.clone(), || Ok(())))
+                .await
+                .unwrap();
+            assert!(ok);
+            assert!(target.try_lock().is_ok());
+
+            let (ok, _) = timeout(
+                TEST_TIMEOUT,
+                run_with_log_capture(target.clone(), || anyhow::bail!("execution failed")),
+            )
+            .await
+            .unwrap();
+            assert!(!ok);
+            assert!(target.try_lock().is_ok());
+        });
+    }
 }
