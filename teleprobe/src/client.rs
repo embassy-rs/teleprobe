@@ -2,13 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::ops::Add;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use blake3::Hasher;
 use futures::{StreamExt, stream};
 use log::{error, info, warn};
 use object::{Object, ObjectSection};
+use parking_lot::Mutex;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -179,9 +181,10 @@ async fn run_job(
     job: Job,
     show_output: bool,
     retries: Option<u8>,
+    cooldown: &Cooldown,
 ) -> Result<Job, Job> {
     for _ in 0..retries.unwrap_or_default().add(1) {
-        match run_job_inner(client, creds, &job, show_output).await {
+        match run_job_inner(client, creds, &job, show_output, cooldown).await {
             Ok(_) => return Ok(job),
             _ => {}
         }
@@ -190,9 +193,83 @@ async fn run_job(
     Err(job)
 }
 
-/// How many times a job is sent when the HTTP request itself fails (DNS, connect, connection reset...),
-/// as opposed to the test failing. Independent of `--retries`.
-const CONNECTION_ATTEMPTS: u32 = 5;
+/// How many times a job is sent when communicating with the server fails (DNS, connect,
+/// connection reset, proxy errors...), as opposed to the test failing. Independent of `--retries`.
+const COMMUNICATION_ATTEMPTS: u32 = 5;
+
+/// First retry happens after this long, doubled on every subsequent attempt,
+/// capped at [`MAX_RETRY_DELAY`].
+const BASE_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+fn retry_delay(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(16);
+    BASE_RETRY_DELAY.saturating_mul(1u32 << shift).min(MAX_RETRY_DELAY)
+}
+
+/// Statuses that can only come from a proxy or other middlebox between the client and the
+/// teleprobe server: the server itself never returns them. They mean the request never
+/// reached the runner (or its reply never made it back), so re-sending is safe.
+///
+/// Note what is deliberately *not* here: `400` is the server telling us the test ran and
+/// failed (a chip failure must not be "recovered" by re-sending), and `500` is warp's
+/// unhandled rejection (e.g. a bad auth token) — also not a communication problem.
+fn is_communication_error(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429 | 502 | 503 | 504)
+}
+
+/// Shared by all jobs: the earliest time at which the next request may be sent.
+///
+/// When communication with the server fails, every failing job pushes this deadline
+/// forward (taking the maximum, so all jobs agree on a single deadline), and every
+/// job — including ones that have not failed yet — waits for it. This turns what would
+/// be a thundering herd of independent retries against a struggling server into a
+/// single trickle of requests. On top of that, each job waits its own jitter past the
+/// deadline so the trickle does not re-synchronize into a new storm.
+#[derive(Clone, Default)]
+struct Cooldown {
+    next: Arc<Mutex<Option<Instant>>>,
+}
+
+impl Cooldown {
+    /// Push the shared deadline forward to at least `now + delay`.
+    fn push(&self, delay: Duration) {
+        let until = Instant::now() + delay;
+        let mut next = self.next.lock();
+        let current = *next;
+        *next = Some(current.unwrap_or(until).max(until));
+    }
+
+    /// Wait until the shared deadline has passed, plus `jitter` on top, so that jobs
+    /// released by the same deadline wake up spread out instead of all at once.
+    async fn wait(&self, jitter: Duration) {
+        loop {
+            let next = *self.next.lock();
+            let Some(until) = next else { return };
+            let now = Instant::now();
+            if now >= until + jitter {
+                return;
+            }
+            tokio::time::sleep(until + jitter - now).await;
+        }
+    }
+}
+
+/// Deterministic jitter in `[0, span)` derived from the job's content hash and attempt
+/// number: different jobs (and different attempts of the same job) get different values
+/// without needing an RNG, so retries spread out instead of synchronizing.
+fn job_jitter(hash: &str, attempt: u32, span: Duration) -> Duration {
+    let mut hasher = Hasher::new();
+    hasher.update(hash.as_bytes());
+    hasher.update(&attempt.to_le_bytes());
+    let value = u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap());
+    let span_ns = span.as_nanos() as u64;
+    if span_ns == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_nanos(value % span_ns)
+    }
+}
 
 async fn send_job(client: &Client, creds: &Credentials, job: &Job) -> Result<(StatusCode, String), reqwest::Error> {
     let res = client
@@ -207,21 +284,51 @@ async fn send_job(client: &Client, creds: &Credentials, job: &Job) -> Result<(St
     Ok((status, logs))
 }
 
-async fn run_job_inner(client: &Client, creds: &Credentials, job: &Job, show_output: bool) -> Result<(), ()> {
+async fn run_job_inner(
+    client: &Client,
+    creds: &Credentials,
+    job: &Job,
+    show_output: bool,
+    cooldown: &Cooldown,
+) -> Result<(), ()> {
     let mut attempt = 1;
     let res = loop {
+        // While the server (or the network) is failing, hold off — and spread jobs out
+        // on wake-up so that recovering does not turn into a request storm.
+        cooldown
+            .wait(job_jitter(&job.hash, attempt, retry_delay(attempt)))
+            .await;
+
         match send_job(client, creds, job).await {
-            Ok(res) => break Ok(res),
-            Err(e) if attempt < CONNECTION_ATTEMPTS => {
-                let delay = Duration::from_secs(1 << (attempt - 1));
+            Ok((status, logs)) if status.is_success() => break Ok((status, logs)),
+            Ok((status, _logs)) if is_communication_error(status) && attempt < COMMUNICATION_ATTEMPTS => {
+                let delay = retry_delay(attempt);
                 warn!(
-                    "=== {} {}: HTTP request failed, retrying in {}s: {:#}",
+                    "=== {} {}: HTTP {}, retrying in {}s (attempt {}/{}): {}",
+                    job.target,
+                    job.path.display(),
+                    status.as_u16(),
+                    delay.as_secs(),
+                    attempt + 1,
+                    COMMUNICATION_ATTEMPTS,
+                    status.canonical_reason().unwrap_or("unknown")
+                );
+                cooldown.push(delay);
+                attempt += 1;
+            }
+            Ok(res) => break Ok(res),
+            Err(e) if attempt < COMMUNICATION_ATTEMPTS => {
+                let delay = retry_delay(attempt);
+                warn!(
+                    "=== {} {}: HTTP request failed, retrying in {}s (attempt {}/{}): {:#}",
                     job.target,
                     job.path.display(),
                     delay.as_secs(),
+                    attempt + 1,
+                    COMMUNICATION_ATTEMPTS,
                     anyhow::Error::from(e)
                 );
-                tokio::time::sleep(delay).await;
+                cooldown.push(delay);
                 attempt += 1;
             }
             Err(e) => break Err(anyhow::Error::from(e).context("HTTP request failed")),
@@ -340,12 +447,14 @@ async fn run(creds: &Credentials, cmd: RunCommand) -> anyhow::Result<()> {
     }
 
     let client = reqwest::Client::new();
+    let cooldown = Cooldown::default();
 
     let results: Vec<_> = stream::iter(jobs_by_target)
         .flat_map_unordered(None, |(_, jobs)| {
             let client = &client;
+            let cooldown = &cooldown;
             stream::iter(jobs)
-                .map(move |job| run_job(client, creds, job, cmd.show_output, cmd.retries))
+                .map(move |job| run_job(client, creds, job, cmd.show_output, cmd.retries, cooldown))
                 .buffer_unordered(2)
         })
         .collect()
@@ -424,5 +533,71 @@ async fn list_targets(creds: &Credentials) -> anyhow::Result<()> {
             res.text().await.unwrap_or_else(|_| "empty".to_string())
         );
         bail!("Running failed!");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_proxy_statuses_are_communication_errors() {
+        // statuses a middlebox can produce: retry these.
+        for code in [408, 429, 502, 503, 504] {
+            assert!(is_communication_error(StatusCode::from_u16(code).unwrap()), "{code}");
+        }
+
+        // 200: test passed. 400: the server ran the test and the chip failed - never
+        // "recover" by re-sending. 401/404/500: config or server bugs, not the network.
+        for code in [200, 400, 401, 404, 500] {
+            assert!(!is_communication_error(StatusCode::from_u16(code).unwrap()), "{code}");
+        }
+    }
+
+    #[test]
+    fn retry_delay_grows_and_is_capped() {
+        assert_eq!(retry_delay(1), Duration::from_secs(1));
+        assert_eq!(retry_delay(2), Duration::from_secs(2));
+        assert_eq!(retry_delay(3), Duration::from_secs(4));
+        assert_eq!(retry_delay(4), Duration::from_secs(8));
+        assert_eq!(retry_delay(5), Duration::from_secs(16));
+        assert_eq!(retry_delay(6), MAX_RETRY_DELAY);
+        assert_eq!(retry_delay(u32::MAX), MAX_RETRY_DELAY);
+    }
+
+    #[test]
+    fn job_jitter_is_deterministic_and_in_bounds() {
+        let span = Duration::from_secs(8);
+        let a = job_jitter("hash-a", 1, span);
+        assert_eq!(a, job_jitter("hash-a", 1, span));
+        assert!(a < span);
+        assert_eq!(job_jitter("hash-a", 1, Duration::ZERO), Duration::ZERO);
+
+        // different jobs and different attempts spread out over the span.
+        let mut seen = HashSet::new();
+        for i in 0..16 {
+            let j = job_jitter(&format!("hash-{i}"), 1, span);
+            assert!(j < span);
+            seen.insert(j);
+        }
+        assert!(seen.len() > 1, "jitter should differ between jobs");
+    }
+
+    #[test]
+    fn cooldown_takes_the_latest_deadline() {
+        let cooldown = Cooldown::default();
+        assert!(cooldown.next.lock().is_none());
+
+        cooldown.push(Duration::from_secs(10));
+        let first = *cooldown.next.lock();
+        assert!(first.is_some());
+
+        // a shorter delay must not pull the deadline back...
+        cooldown.push(Duration::from_millis(1));
+        assert_eq!(*cooldown.next.lock(), first);
+
+        // ...but a longer one pushes it forward.
+        cooldown.push(Duration::from_secs(60));
+        assert!(*cooldown.next.lock() > first);
     }
 }
