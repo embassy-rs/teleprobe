@@ -10,6 +10,7 @@ pub struct Target {
     pub speed: Option<u32>,
     pub up: bool,
     pub power_reset: bool,
+    pub core: Option<usize>,
     pub cycle_delay_seconds: f64,
     pub max_settle_time_millis: u64,
 }
